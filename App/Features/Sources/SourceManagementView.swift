@@ -16,6 +16,7 @@ struct SourceManagementView: View {
     @State private var searchText = ""
     @State private var isSelecting = false
     @State private var selectedSourceIDs = Set<String>()
+    @State private var showsBatchDeleteConfirmation = false
     @AppStorage("bookSourceSort") private var sortMode = "manual"
     @AppStorage("bookSourceSortDescending") private var sortDescending = false
 
@@ -37,6 +38,11 @@ struct SourceManagementView: View {
         return filtered.sorted { lhs, rhs in
             sortDescending ? isOrdered(rhs, before: lhs) : isOrdered(lhs, before: rhs)
         }
+    }
+
+    private var visibleSourceIDs: Set<String> { Set(filteredSources.map(\.id)) }
+    private var allVisibleSelected: Bool {
+        !visibleSourceIDs.isEmpty && visibleSourceIDs.isSubset(of: selectedSourceIDs)
     }
 
     private func isOrdered(_ lhs: BookSource, before rhs: BookSource) -> Bool {
@@ -115,8 +121,9 @@ struct SourceManagementView: View {
                             let ids = Set(offsets.compactMap { filteredSources.indices.contains($0) ? filteredSources[$0].id : nil })
                             Task { await library.remove(sourceIDs: ids) }
                         }
+                        .deleteDisabled(isSelecting)
                     } header: {
-                        Text("\(filteredSources.count) 个书源")
+                        Text(isSelecting ? "\(filteredSources.count) 个书源，已选择 \(selectedSourceIDs.count) 个" : "\(filteredSources.count) 个书源")
                     } footer: {
                         Text("共 \(library.sources.count) 个书源，\(library.sources.filter(\.enabled).count) 个已启用")
                     }
@@ -172,27 +179,43 @@ struct SourceManagementView: View {
         }
         .safeAreaInset(edge: .bottom) {
             if isSelecting {
-                HStack(spacing: 18) {
-                    Button(selectedSourceIDs.count == filteredSources.count ? "取消全选" : "全选") {
-                        if selectedSourceIDs.count == filteredSources.count { selectedSourceIDs.removeAll() }
-                        else { selectedSourceIDs = Set(filteredSources.map(\.id)) }
+                HStack(spacing: 10) {
+                    Button(allVisibleSelected ? "取消全选" : "全选") {
+                        if allVisibleSelected { selectedSourceIDs.subtract(visibleSourceIDs) }
+                        else { selectedSourceIDs.formUnion(visibleSourceIDs) }
                     }
+                    .disabled(visibleSourceIDs.isEmpty)
                     Spacer()
-                    Button("分组", systemImage: "folder") { showsBatchGroups = true }
+                    Button("分组") { showsBatchGroups = true }
                         .disabled(selectedSourceIDs.isEmpty)
-                    Button("启用", systemImage: "checkmark.circle") {
+                    Button("启用") {
                         Task { await library.setEnabled(true, for: selectedSourceIDs) }
                     }
                     .disabled(selectedSourceIDs.isEmpty)
-                    Button("停用", systemImage: "pause.circle") {
+                    Button("停用") {
                         Task { await library.setEnabled(false, for: selectedSourceIDs) }
                     }
                     .disabled(selectedSourceIDs.isEmpty)
+                    Button("删除", role: .destructive) { showsBatchDeleteConfirmation = true }
+                        .disabled(selectedSourceIDs.isEmpty)
                 }
                 .font(.subheadline.weight(.semibold))
                 .padding(.horizontal, 18).padding(.vertical, 12)
                 .background(.ultraThinMaterial)
             }
+        }
+        .alert("删除选中的书源？", isPresented: $showsBatchDeleteConfirmation) {
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) {
+                let ids = selectedSourceIDs
+                Task {
+                    await library.remove(sourceIDs: ids)
+                    selectedSourceIDs.formIntersection(Set(library.sources.map(\.id)))
+                    if selectedSourceIDs.isEmpty { isSelecting = false }
+                }
+            }
+        } message: {
+            Text("将删除已选择的 \(selectedSourceIDs.count) 个书源，包括筛选后未显示的书源。")
         }
         .sheet(isPresented: $showsNewSource) { SourceEditorView().environmentObject(library) }
         .sheet(isPresented: $showsQRImporter) {
