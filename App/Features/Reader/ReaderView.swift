@@ -1556,7 +1556,7 @@ struct ReaderView: View {
                                 Text(["左上", "上中", "右上", "左中", "中央", "右中", "左下", "下中", "右下"][index])
                                     .font(.caption).foregroundStyle(.secondary)
                                 if index == 4 {
-                                    Text("固定：菜单")
+                                    Text("固定：菜单（放大）")
                                         .font(.caption.weight(.medium))
                                         .foregroundStyle(ReadingTheme.accent)
                                         .frame(maxWidth: .infinity, minHeight: 32)
@@ -1576,6 +1576,11 @@ struct ReaderView: View {
                         }
                     }
                 }
+                Text("中央判定区已放大到屏幕中间的一半，点偏也会弹出菜单；在任意位置长按约 0.35 秒同样弹出菜单。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 8)
             }
             .padding(10)
             .navigationTitle("点击区域设置")

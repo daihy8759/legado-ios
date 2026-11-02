@@ -406,3 +406,41 @@ final class ReaderScrollGeometryTests: XCTestCase {
               onPageChanged: {}, onTapAction: { _ in })
     }
 }
+
+final class ReaderTapMappingTests: XCTestCase {
+    private let size = CGSize(width: 390, height: 844)
+    private let actions = [2, 2, 1, 2, 0, 1, 2, 1, 1]
+
+    func testCenterZoneCoversMiddleHalf() {
+        XCTAssertTrue(ReaderTapMapping.isCenter(CGPoint(x: size.width * 0.5, y: size.height * 0.5), in: size))
+        // 0.30 落在旧九宫格「左中」内，放大后应属于中央菜单区。
+        XCTAssertTrue(ReaderTapMapping.isCenter(CGPoint(x: size.width * 0.30, y: size.height * 0.5), in: size))
+        XCTAssertTrue(ReaderTapMapping.isCenter(CGPoint(x: size.width * 0.70, y: size.height * 0.5), in: size))
+        XCTAssertTrue(ReaderTapMapping.isCenter(CGPoint(x: size.width * 0.5, y: size.height * 0.30), in: size))
+        XCTAssertFalse(ReaderTapMapping.isCenter(CGPoint(x: size.width * 0.20, y: size.height * 0.5), in: size))
+    }
+
+    func testCenterTapReturnsMenu() {
+        XCTAssertEqual(ReaderTapMapping.action(for: CGPoint(x: size.width * 0.30, y: size.height * 0.5), in: size, clickActions: actions), 0)
+        XCTAssertEqual(ReaderTapMapping.action(for: CGPoint(x: size.width * 0.5, y: size.height * 0.5), in: size, clickActions: actions), 0)
+    }
+
+    func testOutsideCenterUsesGrid() {
+        // 左边缘中点 → 左中格（上一页）
+        XCTAssertEqual(ReaderTapMapping.action(for: CGPoint(x: size.width * 0.05, y: size.height * 0.5), in: size, clickActions: actions), 2)
+        // 右上角 → 下一页
+        XCTAssertEqual(ReaderTapMapping.action(for: CGPoint(x: size.width * 0.95, y: size.height * 0.05), in: size, clickActions: actions), 1)
+        // 左下角 → 上一页
+        XCTAssertEqual(ReaderTapMapping.action(for: CGPoint(x: size.width * 0.05, y: size.height * 0.95), in: size, clickActions: actions), 2)
+    }
+
+    func testNoopActionPreserved() {
+        var custom = actions
+        custom[8] = -1
+        XCTAssertEqual(ReaderTapMapping.action(for: CGPoint(x: size.width * 0.95, y: size.height * 0.95), in: size, clickActions: custom), -1)
+    }
+
+    func testZeroSizeFallsBackToMenu() {
+        XCTAssertEqual(ReaderTapMapping.action(for: .zero, in: .zero, clickActions: actions), 0)
+    }
+}

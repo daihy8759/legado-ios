@@ -353,6 +353,7 @@ struct ReaderTextView: UIViewRepresentable {
         private weak var nextSwipe: UISwipeGestureRecognizer?
         private weak var previousSwipe: UISwipeGestureRecognizer?
         private weak var readerTap: UITapGestureRecognizer?
+        private weak var readerLongPress: UILongPressGestureRecognizer?
         private weak var loadingFooter: UIView?
         private var didRequestLoadingCancellation = false
 
@@ -372,6 +373,15 @@ struct ReaderTextView: UIViewRepresentable {
             tap.delegate = self
             view.addGestureRecognizer(tap)
             readerTap = tap
+            // 长按任意位置弹出阅读菜单（比“点中心格”更容错）。
+            let longPress = UILongPressGestureRecognizer(target: self, action: #selector(longPressed(_:)))
+            longPress.minimumPressDuration = 0.35
+            longPress.allowableMovement = 24
+            longPress.delegate = self
+            view.addGestureRecognizer(longPress)
+            readerLongPress = longPress
+            // 快速点击仍然走 tap；只有长按失败（抬手未到 0.35s）才交给 tap。
+            tap.require(toFail: longPress)
             let next = UISwipeGestureRecognizer(target: self, action: #selector(swiped(_:)))
             next.direction = .left
             view.addGestureRecognizer(next)
@@ -387,6 +397,7 @@ struct ReaderTextView: UIViewRepresentable {
             shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
         ) -> Bool {
             gestureRecognizer === readerTap || otherGestureRecognizer === readerTap
+                || gestureRecognizer === readerLongPress || otherGestureRecognizer === readerLongPress
         }
 
         func updateInteractionMode(on view: UITextView, isScrollMode: Bool) {
@@ -829,16 +840,14 @@ struct ReaderTextView: UIViewRepresentable {
             let point = gesture.location(in: view)
             // UIScrollView changes its bounds origin as content scrolls, and
             // gesture locations use that content coordinate space. Convert
-            // back to viewport coordinates before dividing the visible screen
-            // into the 3×3 tap grid.
+            // back to viewport coordinates before mapping the visible screen.
             let viewportX = point.x - view.bounds.minX
             let viewportY = point.y - view.bounds.minY
-            let column = min(max(Int(viewportX / max(view.bounds.width / 3, 1)), 0), 2)
-            let row = min(max(Int(viewportY / max(view.bounds.height / 3, 1)), 0), 2)
-            let index = row * 3 + column
-            let action = index == 4
-                ? 0
-                : (parent.clickActions.indices.contains(index) ? parent.clickActions[index] : 0)
+            let action = ReaderTapMapping.action(
+                for: CGPoint(x: viewportX, y: viewportY),
+                in: view.bounds.size,
+                clickActions: parent.clickActions
+            )
 
             if parent.pageAnimation == 3, action == 1 || action == 2 {
                 return
@@ -849,6 +858,12 @@ struct ReaderTextView: UIViewRepresentable {
             case -1: break
             default: parent.onTapAction(action)
             }
+        }
+
+        @objc private func longPressed(_ gesture: UILongPressGestureRecognizer) {
+            guard gesture.state == .began, let view = textView, !view.isDragging else { return }
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            parent.onTapAction(0)
         }
 
         @objc private func swiped(_ gesture: UISwipeGestureRecognizer) {

@@ -50,6 +50,8 @@ struct ReaderScrollView: UIViewRepresentable {
         private var wasLoadingBehind = false
         private var lastPageKey = ""
         private var reachedEnd = false
+        private weak var readerTap: UITapGestureRecognizer?
+        private weak var readerLongPress: UILongPressGestureRecognizer?
         #if DEBUG
         private var decelerationInsertions = 0
         private var continuedDecelerations = 0
@@ -72,7 +74,18 @@ struct ReaderScrollView: UIViewRepresentable {
             collection.register(ReaderScrollCell.self, forCellWithReuseIdentifier: "text")
             let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
             tap.delegate = self
+            tap.delaysTouchesBegan = false
+            tap.cancelsTouchesInView = false
             collection.addGestureRecognizer(tap)
+            readerTap = tap
+            // 长按任意位置弹出阅读菜单，避免只能点中心格。
+            let longPress = UILongPressGestureRecognizer(target: self, action: #selector(longPressed(_:)))
+            longPress.minimumPressDuration = 0.35
+            longPress.allowableMovement = 24
+            longPress.delegate = self
+            collection.addGestureRecognizer(longPress)
+            readerLongPress = longPress
+            tap.require(toFail: longPress)
             collection.viewportChanged = { [weak self, weak collection] in
                 guard let self, let collection else { return }
                 self.update(collection)
@@ -321,7 +334,9 @@ struct ReaderScrollView: UIViewRepresentable {
         }
 
         @objc private func tapped(_ gesture: UITapGestureRecognizer) {
-            guard let view, !view.isDragging, !view.isDecelerating else { return }
+            guard let view, gesture.state == .ended, !view.isDragging else { return }
+            // 惯性减速中点击：先停下滚动，再按点击处理，避免“刚滑完点不动”。
+            if view.isDecelerating { view.setContentOffset(view.contentOffset, animated: false) }
             let point = gesture.location(in: view)
             if let row = (view.collectionViewLayout as? ReaderContinuousLayout)?.row(at: point.y),
                blocks[row].chapter.chapter.error != nil {
@@ -329,12 +344,27 @@ struct ReaderScrollView: UIViewRepresentable {
                 return
             }
             let x = point.x - view.bounds.minX, y = point.y - view.bounds.minY
-            let column = min(max(Int(x / max(view.bounds.width / 3, 1)), 0), 2)
-            let row = min(max(Int(y / max(view.bounds.height / 3, 1)), 0), 2)
-            let index = row * 3 + column
-            let actions = parent.configuration.clickActions
-            let action = index == 4 ? 0 : (actions.indices.contains(index) ? actions[index] : 0)
+            let action = ReaderTapMapping.action(
+                for: CGPoint(x: x, y: y),
+                in: view.bounds.size,
+                clickActions: parent.configuration.clickActions
+            )
             if action != 1, action != 2, action != -1 { parent.configuration.onTapAction(action) }
+        }
+
+        @objc private func longPressed(_ gesture: UILongPressGestureRecognizer) {
+            guard gesture.state == .began, let view, !view.isDragging else { return }
+            if view.isDecelerating { view.setContentOffset(view.contentOffset, animated: false) }
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            parent.configuration.onTapAction(0)
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            gestureRecognizer === readerTap || otherGestureRecognizer === readerTap
+                || gestureRecognizer === readerLongPress || otherGestureRecognizer === readerLongPress
         }
 
         @objc private func step(_ link: CADisplayLink) {
