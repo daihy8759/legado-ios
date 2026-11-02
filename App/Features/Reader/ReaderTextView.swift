@@ -1,7 +1,68 @@
 import SwiftUI
 import UIKit
 
+@available(iOS 16.0, *)
+@MainActor
+final class ReaderSelectionMenu: NSObject, @preconcurrency UIEditMenuInteractionDelegate {
+    private var interaction: UIEditMenuInteraction?
+    private let selectedText: String
+    private let onSelect: (Bool) -> Void
+
+    init(selectedText: String, onSelect: @escaping (Bool) -> Void) {
+        self.selectedText = selectedText
+        self.onSelect = onSelect
+    }
+
+    func present(on view: UIView, at point: CGPoint) {
+        let interaction = UIEditMenuInteraction(delegate: self)
+        self.interaction = interaction
+        view.addInteraction(interaction)
+        interaction.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: point))
+    }
+
+    func dismiss() {
+        interaction?.dismissMenu()
+        if let interaction { interaction.view?.removeInteraction(interaction) }
+    }
+
+    func editMenuInteraction(_ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
+                             suggestedActions: [UIMenuElement]) -> UIMenu? {
+        UIMenu(children: [
+            UIAction(title: "高亮", image: UIImage(systemName: "highlighter")) { [weak self] _ in self?.onSelect(false) },
+            UIAction(title: "写想法", image: UIImage(systemName: "square.and.pencil")) { [weak self] _ in self?.onSelect(true) },
+            UIAction(title: "复制", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in UIPasteboard.general.string = self?.selectedText }
+        ] + suggestedActions)
+    }
+}
+
+final class ReaderHighlightLayoutManager: NSLayoutManager {
+    var highlights: [(range: NSRange, color: UIColor)] = []
+
+    override func drawBackground(forGlyphRange glyphsToShow: NSRange, at origin: CGPoint) {
+        super.drawBackground(forGlyphRange: glyphsToShow, at: origin)
+        for highlight in highlights {
+            let glyphs = glyphRange(forCharacterRange: highlight.range, actualCharacterRange: nil)
+            let visible = NSIntersectionRange(glyphs, glyphsToShow)
+            guard visible.length > 0, let container = textContainers.first else { continue }
+            highlight.color.setFill()
+            enumerateEnclosingRects(forGlyphRange: visible, withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0), in: container) { rect, _ in
+                UIRectFill(rect.offsetBy(dx: origin.x, dy: origin.y))
+            }
+        }
+    }
+}
+
 private final class ReaderLayoutTextView: UITextView {
+    var selectionAction: ((UITextView, Bool) -> Void)?
+    @objc func highlightSelection() { selectionAction?(self, false) }
+    @objc func annotateSelection() { selectionAction?(self, true) }
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(highlightSelection) || action == #selector(annotateSelection) {
+            return selectedRange.length > 0
+        }
+        return super.canPerformAction(action, withSender: sender)
+    }
     var onLayout: ((UITextView) -> Void)?
     var clipsPagedText = false
     private var reportedSize = CGSize.zero
@@ -33,6 +94,24 @@ private final class ReaderLayoutTextView: UITextView {
         reportedSize = bounds.size
         reportedContentSize = contentSize
         onLayout?(self)
+    }
+}
+
+struct ReaderHighlight: Equatable {
+    let quote: String
+    let color: Int
+    var startOffset: Int? = nil
+
+    static let palette: [UIColor] = [
+        UIColor(red: 1.00, green: 0.86, blue: 0.30, alpha: 0.45),
+        UIColor(red: 0.55, green: 0.90, blue: 0.55, alpha: 0.40),
+        UIColor(red: 0.50, green: 0.76, blue: 1.00, alpha: 0.40),
+        UIColor(red: 1.00, green: 0.62, blue: 0.78, alpha: 0.38),
+        UIColor(red: 0.76, green: 0.65, blue: 1.00, alpha: 0.38)
+    ]
+
+    static func uiColor(_ index: Int) -> UIColor {
+        palette[min(max(index, 0), palette.count - 1)]
     }
 }
 
@@ -120,6 +199,7 @@ struct ReaderTextView: UIViewRepresentable {
     let autoFlipInterval: Double
     let isLoadingNextChapter: Bool
     let secondsPerScreen: Double
+    var highlights: [ReaderHighlight] = []
     let onReachedEnd: (Int) -> Void
     let onReachedStart: (Int) -> Void
     let onEnteredPrevious: (Int) -> Void
@@ -128,18 +208,19 @@ struct ReaderTextView: UIViewRepresentable {
     let onCancelNextLoading: () -> Void
     let onPageChanged: () -> Void
     let onTapAction: (Int) -> Void
+    var onSelectionNote: ((String, Int, Bool) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
     func makeUIView(context: Context) -> UITextView {
         // Pagination uses NSLayoutManager. Start in TextKit 1 rather than
         // switching a TextKit 2 view after its content size has been computed.
-        let view: ReaderLayoutTextView
-        if #available(iOS 16.0, *) {
-            view = ReaderLayoutTextView(usingTextLayoutManager: false)
-        } else {
-            view = ReaderLayoutTextView(frame: .zero)
-        }
+        let storage = NSTextStorage()
+        let manager = ReaderHighlightLayoutManager()
+        let container = NSTextContainer(size: .zero)
+        manager.addTextContainer(container)
+        storage.addLayoutManager(manager)
+        let view = ReaderLayoutTextView(frame: .zero, textContainer: container)
         view.onLayout = { [weak coordinator = context.coordinator] view in
             coordinator?.reportPage(in: view)
             coordinator?.reportPageRanges(in: view)
@@ -151,7 +232,7 @@ struct ReaderTextView: UIViewRepresentable {
         view.isOpaque = backgroundColor != .clear
         view.delegate = context.coordinator
         view.isEditable = false
-        view.isSelectable = false
+        view.isSelectable = context.coordinator.selectionActive
         view.alwaysBounceVertical = effectivePageAnimation == 3
         view.isScrollEnabled = true
         view.contentInsetAdjustmentBehavior = .never
@@ -178,7 +259,7 @@ struct ReaderTextView: UIViewRepresentable {
             view.clipsPagedText = effectivePageAnimation != 3
             view.setNeedsLayout()
         }
-        view.isSelectable = false
+        view.isSelectable = context.coordinator.selectionActive
         view.alwaysBounceVertical = effectivePageAnimation == 3
         view.isScrollEnabled = true
         view.panGestureRecognizer.isEnabled = effectivePageAnimation == 3
@@ -188,9 +269,11 @@ struct ReaderTextView: UIViewRepresentable {
         context.coordinator.updateInteractionMode(on: view, isScrollMode: effectivePageAnimation == 3)
         view.backgroundColor = backgroundColor
         view.isOpaque = backgroundColor != .clear
-        view.isSelectable = false
-        view.selectedRange = NSRange(location: 0, length: 0)
-        view.resignFirstResponder()
+        view.isSelectable = context.coordinator.selectionActive
+        if !context.coordinator.selectionActive {
+            view.selectedRange = NSRange(location: 0, length: 0)
+            view.resignFirstResponder()
+        }
         view.textContainerInset = .init(
             top: CGFloat(paddingTop + headerInset),
             left: CGFloat(paddingLeft),
@@ -292,11 +375,56 @@ struct ReaderTextView: UIViewRepresentable {
             isPaused: isAutoReadPaused,
             interval: autoFlipInterval
         )
+        Self.applyHighlights(highlights, to: view, bodyRange: NSRange(
+            location: context.coordinator.renderedPrefixLength,
+            length: max(context.coordinator.currentBodyEnd - context.coordinator.renderedPrefixLength, 0)
+        ))
         // SwiftUI can reset the bindings after the chapter's TextKit layout has
         // already completed. Reconcile them even when the text/style is unchanged.
         if view.bounds.width > 0, view.bounds.height > 0 {
             context.coordinator.reportPage(in: view)
             if pageRanges.isEmpty { context.coordinator.reportPageRanges(in: view) }
+        }
+    }
+
+    /// 把笔记对应的原文段落涂上底色。段落锚点比字符偏移稳定：
+    /// 换字号、换字体、重排后依然能定位到同一段。
+    private static func applyHighlights(
+        _ highlights: [ReaderHighlight],
+        to view: UITextView,
+        bodyRange: NSRange
+    ) {
+        let text = (view.text ?? "") as NSString
+        guard let manager = view.layoutManager as? ReaderHighlightLayoutManager else { return }
+        manager.highlights = []
+        defer {
+            manager.invalidateDisplay(forCharacterRange: NSRange(location: 0, length: text.length))
+            view.setNeedsDisplay()
+        }
+        guard !highlights.isEmpty, bodyRange.length > 0 else { return }
+        for item in highlights {
+            let quote = item.quote.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !quote.isEmpty else { continue }
+            if let offset = item.startOffset {
+                let range = NSRange(location: bodyRange.location + max(offset, 0), length: (quote as NSString).length)
+                if NSMaxRange(range) <= NSMaxRange(bodyRange), text.substring(with: range) == quote {
+                    manager.highlights.append((range, ReaderHighlight.uiColor(item.color)))
+                    continue
+                }
+            }
+            var searchRange = bodyRange
+            var matched = 0
+            while searchRange.length > 0, matched < 1 {
+                let found = text.range(of: quote, options: [.caseInsensitive], range: searchRange)
+                if found.location == NSNotFound { break }
+                manager.highlights.append((found, ReaderHighlight.uiColor(item.color)))
+                let next = found.location + max(found.length, 1)
+                searchRange = NSRange(
+                    location: next,
+                    length: max(bodyRange.location + bodyRange.length - next, 0)
+                )
+                matched += 1
+            }
         }
     }
 
@@ -306,6 +434,8 @@ struct ReaderTextView: UIViewRepresentable {
 
     final class Coordinator: NSObject, UITextViewDelegate, UIGestureRecognizerDelegate {
         var parent: ReaderTextView
+        var selectionActive = false
+        var selectionMenu: AnyObject?
         var contentKey = 0
         var primaryContentKey = 0
         var styleKey = ""
@@ -842,6 +972,14 @@ struct ReaderTextView: UIViewRepresentable {
 
         @objc private func tapped(_ gesture: UITapGestureRecognizer) {
             guard let view = textView, gesture.state == .ended else { return }
+            if selectionActive {
+                selectionActive = false
+                view.selectedRange = NSRange(location: 0, length: 0)
+                view.isSelectable = false
+                view.resignFirstResponder()
+                if #available(iOS 16.0, *) { (selectionMenu as? ReaderSelectionMenu)?.dismiss() }
+                return
+            }
             let point = gesture.location(in: view)
             // UIScrollView changes its bounds origin as content scrolls, and
             // gesture locations use that content coordinate space. Convert
@@ -868,7 +1006,47 @@ struct ReaderTextView: UIViewRepresentable {
         @objc private func longPressed(_ gesture: UILongPressGestureRecognizer) {
             guard gesture.state == .began, let view = textView, !view.isDragging else { return }
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            parent.onTapAction(0)
+            guard parent.onSelectionNote != nil, let reader = view as? ReaderLayoutTextView else {
+                parent.onTapAction(0)
+                return
+            }
+            let point = gesture.location(in: view)
+            guard let position = view.closestPosition(to: point),
+                  let word = view.tokenizer.rangeEnclosingPosition(position, with: .word, inDirection: UITextDirection(rawValue: 1)) else { return }
+            let start = view.offset(from: view.beginningOfDocument, to: word.start)
+            let end = view.offset(from: view.beginningOfDocument, to: word.end)
+            guard start >= renderedPrefixLength, end <= currentBodyEnd else { return }
+            selectionActive = true
+            view.isSelectable = true
+            view.becomeFirstResponder()
+            view.selectedRange = NSRange(location: start, length: end - start)
+            reader.selectionAction = { [weak self] view, writesIdea in
+                guard let self else { return }
+                let range = view.selectedRange
+                guard range.location >= self.renderedPrefixLength, NSMaxRange(range) <= self.currentBodyEnd,
+                      range.length > 0 else { return }
+                self.parent.onSelectionNote?((view.text as NSString).substring(with: range),
+                                             range.location - self.renderedPrefixLength, writesIdea)
+                self.selectionActive = false
+                view.selectedRange = NSRange(location: 0, length: 0)
+                view.isSelectable = false
+                view.resignFirstResponder()
+            }
+            if #available(iOS 16.0, *) {
+                (selectionMenu as? ReaderSelectionMenu)?.dismiss()
+                let menu = ReaderSelectionMenu(selectedText: (view.text as NSString).substring(with: view.selectedRange)) { [weak reader] writesIdea in
+                    guard let reader else { return }
+                    reader.selectionAction?(reader, writesIdea)
+                }
+                selectionMenu = menu
+                menu.present(on: view, at: point)
+            } else {
+                UIMenuController.shared.menuItems = [
+                    UIMenuItem(title: "高亮", action: #selector(ReaderLayoutTextView.highlightSelection)),
+                    UIMenuItem(title: "写想法", action: #selector(ReaderLayoutTextView.annotateSelection))
+                ]
+                UIMenuController.shared.showMenu(from: view, rect: view.firstRect(for: word))
+            }
         }
 
         @objc private func swiped(_ gesture: UISwipeGestureRecognizer) {

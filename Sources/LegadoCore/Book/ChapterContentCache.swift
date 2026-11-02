@@ -199,10 +199,13 @@ public struct CoordinatedChapterContent: Sendable {
 public actor ChapterContentCoordinator {
     private let loader: any ChapterContentLoading
     private let cache: ChapterContentCache
+    private let searchIndex: BookSearchIndex?
 
-    public init(loader: any ChapterContentLoading = NetworkBookService(), cache: ChapterContentCache = .live()) {
+    public init(loader: any ChapterContentLoading = NetworkBookService(), cache: ChapterContentCache = .live(),
+                searchIndex: BookSearchIndex? = nil) {
         self.loader = loader
         self.cache = cache
+        self.searchIndex = searchIndex
     }
 
     public func load(
@@ -215,6 +218,7 @@ public actor ChapterContentCoordinator {
     ) async -> CoordinatedChapterContent {
         if !forceRefresh, let cached = try? await cache.load(bookURL: book.bookUrl, chapterURL: chapter.url),
                   cached.sourceID == nil || cached.sourceID == source.id {
+            try? await index(content: cached.content, book: book, chapter: chapter)
             return .init(report: .init(
                 title: cached.title,
                 content: cached.content,
@@ -243,6 +247,7 @@ public actor ChapterContentCoordinator {
                 supplementalContent: report.supplementalContent,
                 sourceID: source.id
             ))
+            try? await index(content: report.content, book: book, chapter: chapter)
         }
     }
 
@@ -256,6 +261,7 @@ public actor ChapterContentCoordinator {
             content: content,
             sourceID: book.origin
         ))
+        try await index(content: content, book: book, chapter: chapter)
     }
 
     @discardableResult
@@ -274,5 +280,11 @@ public actor ChapterContentCoordinator {
 
     public func invalidate(bookURL: String) async {
         try? await cache.remove(bookURL: bookURL)
+        try? await searchIndex?.remove(bookURL: bookURL)
+    }
+
+    private func index(content: String, book: Book, chapter: BookChapter) async throws {
+        try await searchIndex?.index(bookURL: book.bookUrl, bookName: book.name, chapterIndex: chapter.index,
+                                     chapterName: chapter.title, content: content)
     }
 }

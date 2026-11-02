@@ -59,6 +59,26 @@ final class ReaderViewModel: ObservableObject {
     private var sourceCacheNeedsInvalidation = false
     private var pendingSourceContent: ChapterContentReport?
 
+    /// 章节正文落库后写入搜索索引。为空时完全不产生额外开销。
+    var searchIndex: BookSearchIndex?
+
+    private func indexContent(_ text: String, chapter: BookChapter) {
+        guard let searchIndex, !text.isEmpty else { return }
+        let bookURL = book.bookUrl
+        let bookName = book.name
+        let chapterIndex = chapter.index
+        let chapterName = chapter.title
+        Task {
+            try? await searchIndex.index(
+                bookURL: bookURL,
+                bookName: bookName,
+                chapterIndex: chapterIndex,
+                chapterName: chapterName,
+                content: text
+            )
+        }
+    }
+
     func bookmarks(at position: Int, in bookmarks: [Bookmark], pageRange: NSRange? = nil) -> [Bookmark] {
         bookmarks.filter { bookmark in
             guard bookmark.bookName == book.name, bookmark.bookAuthor == book.author,
@@ -148,6 +168,9 @@ final class ReaderViewModel: ObservableObject {
         paragraphs = Self.makeParagraphs(chapter.content)
         diagnostics = []
         hasLoadedCurrentChapter = true
+        if chapters.indices.contains(chapter.id) {
+            indexContent(chapter.content, chapter: chapters[chapter.id])
+        }
     }
 
     private func scrollChapterForCurrentContent() -> ReaderScrollChapter {
@@ -177,7 +200,7 @@ final class ReaderViewModel: ObservableObject {
         currentIndex = resolvedIndex
         self.source = source
         localService = .init()
-        contentCoordinator = .init(loader: service, cache: cache)
+        contentCoordinator = .init(loader: service, cache: cache, searchIndex: .live())
         requestedPosition = resolvedIndex == book.durChapterIndex ? max(book.durChapterPos, 0) : 0
         title = chapters.indices.contains(resolvedIndex) ? chapters[resolvedIndex].title : book.name
     }
@@ -314,6 +337,7 @@ final class ReaderViewModel: ObservableObject {
         content = processed.content
         paragraphs = Self.makeParagraphs(processed.content)
         diagnostics = report.diagnostics + processed.diagnostics
+        indexContent(processed.content, chapter: effectiveChapter)
     }
 
     func prepareAdjacentWindows() {

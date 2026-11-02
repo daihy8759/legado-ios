@@ -107,6 +107,12 @@ final class SourceLibraryModel: ObservableObject {
         SourceLibraryModel(repository: InMemoryBookSourceRepository(sources: sources))
     }
 
+    /// 备份导入后强制重新读取，绕过首次加载的短路。
+    func reload() async {
+        sources = []
+        await load()
+    }
+
     func load() async {
         guard sources.isEmpty else { return }
         isWorking = true

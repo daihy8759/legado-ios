@@ -158,6 +158,42 @@ final class ReaderBookmarkPersistenceTests: XCTestCase {
 
 @MainActor
 final class ReaderScrollGeometryTests: XCTestCase {
+    func testHighlightDrawsWithoutRebuildingTextOrChangingGlyphGeometry() throws {
+        for fontSize in [16.0, 28.0] {
+            let chapter = ReaderScrollChapter(id: 0, title: "第一章", content: "第一段重复原文。\n第二段重复原文。")
+            let fixture = host(chapters: [chapter], active: 0)
+            defer { fixture.window.isHidden = true; fixture.coordinator.displayLink?.invalidate() }
+            fixture.coordinator.parent = surface(chapters: [chapter], active: 0, fontSize: fontSize)
+            fixture.coordinator.update(fixture.view)
+            let layout = try XCTUnwrap(fixture.coordinator.blocks.first?.chapter)
+            let beforeRanges = fixture.coordinator.blocks.map(\.glyphRange)
+            let beforeRect = layout.manager.usedRect(for: layout.container)
+            let characterOffset = (chapter.content as NSString).range(of: "重复原文", options: .backwards).location
+            var updated = fixture.coordinator.parent
+            updated.highlights = [0: [ReaderHighlight(quote: "重复原文", color: 0, startOffset: characterOffset)]]
+            fixture.coordinator.parent = updated
+            fixture.coordinator.update(fixture.view)
+            XCTAssertTrue(layout === fixture.coordinator.blocks.first?.chapter)
+            XCTAssertEqual(beforeRanges, fixture.coordinator.blocks.map(\.glyphRange))
+            XCTAssertEqual(beforeRect, layout.manager.usedRect(for: layout.container))
+            XCTAssertEqual(layout.manager.highlights.first?.range.location, layout.bodyStart + characterOffset)
+            XCTAssertNil(layout.storage.attribute(.backgroundColor, at: layout.bodyStart + characterOffset, effectiveRange: nil))
+            let renderer = UIGraphicsImageRenderer(size: CGSize(width: 390, height: 250))
+            let highlighted = renderer.pngData { context in
+                UIColor.white.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 390, height: 250))
+                layout.manager.drawBackground(forGlyphRange: NSRange(location: 0, length: layout.manager.numberOfGlyphs), at: .zero)
+            }
+            layout.manager.highlights = []
+            let plain = renderer.pngData { context in
+                UIColor.white.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 390, height: 250))
+                layout.manager.drawBackground(forGlyphRange: NSRange(location: 0, length: layout.manager.numberOfGlyphs), at: .zero)
+            }
+            XCTAssertNotEqual(highlighted, plain)
+        }
+    }
+
     func testPagedChapterStartsAtHeadingAndRestoresLaterPositions() async throws {
         let title = "第一章 · 开始"
         let body = String(repeating: "这里是一段足够长的阅读正文。\n", count: 100)

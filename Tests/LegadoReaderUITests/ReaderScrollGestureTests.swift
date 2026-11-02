@@ -3,6 +3,37 @@ import UIKit
 
 @MainActor
 final class ReaderScrollGestureTests: XCTestCase {
+    func testSelectionCanCreateNotesInPagedAndScrollReaders() throws {
+        continueAfterFailure = false
+        for mode in ["0", "3"] {
+            let app = XCUIApplication()
+            app.launchArguments = ["-uiDemo", "-uiDemoReader", "-pageAnim", mode, "-textSize", "20"]
+            app.launch()
+            let reader = mode == "3" ? app.collectionViews["reader.continuous"] : app.textViews["reader.text"]
+            XCTAssertTrue(reader.waitForExistence(timeout: 20))
+            reader.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.3)).press(forDuration: 0.7)
+            let annotate = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "写想法")).firstMatch
+            if !annotate.waitForExistence(timeout: 5) {
+                let attachment = XCTAttachment(screenshot: app.screenshot())
+                attachment.lifetime = .keepAlways
+                add(attachment)
+                print(app.debugDescription)
+                XCTFail("写想法 menu did not appear in mode \(mode)")
+                return
+            }
+            annotate.tap()
+            let idea = app.textViews["笔记想法"]
+            XCTAssertTrue(idea.waitForExistence(timeout: 5))
+            let quote = app.textViews["划线原文"]
+            XCTAssertFalse((quote.value as? String ?? "").isEmpty)
+            idea.tap()
+            idea.typeText("P0 note regression \(mode)")
+            app.buttons["保存"].tap()
+            XCTAssertTrue(reader.waitForExistence(timeout: 5))
+            app.terminate()
+        }
+    }
+
     func testInkReaderRespectsSafeAreaAndPaintsTheBottomEdge() throws {
         for mode in ["0", "3"] {
             let app = XCUIApplication()

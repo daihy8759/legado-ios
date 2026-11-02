@@ -34,7 +34,7 @@ final class BookDetailViewModel: ObservableObject {
         self.service = service
         let chapters = chapterRepository
         updateCoordinator = BookUpdateCoordinator(repository: chapters, loader: service)
-        contentCoordinator = ChapterContentCoordinator(loader: service)
+        contentCoordinator = ChapterContentCoordinator(loader: service, searchIndex: .live())
         sourceSwitchService = BookSourceSwitchService(
             detailLoader: service,
             chapterLoader: service,
@@ -61,7 +61,7 @@ final class BookDetailViewModel: ObservableObject {
         self.service = service
         let chapters = AppBookChapterRepository.live()
         updateCoordinator = BookUpdateCoordinator(repository: chapters, loader: service)
-        contentCoordinator = ChapterContentCoordinator(loader: service)
+        contentCoordinator = ChapterContentCoordinator(loader: service, searchIndex: .live())
         sourceSwitchService = BookSourceSwitchService(
             detailLoader: service,
             chapterLoader: service,

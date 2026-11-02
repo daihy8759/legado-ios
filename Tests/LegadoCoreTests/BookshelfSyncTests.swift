@@ -265,3 +265,87 @@ private actor MemoryShelfStorage: BookshelfSyncStorage {
         guard directories.insert(path).inserted else { throw RemoteStorageError.http(409) }
     }
 }
+
+extension BookshelfSyncTests {
+    func testLibraryDataSyncImportsEditsAndPropagatesTombstones() async throws {
+        let storage = MemoryShelfStorage()
+        let first = LibraryDataSyncEngine(storage: storage, stateURL: folder.appendingPathComponent("data-a.json"))
+        let second = LibraryDataSyncEngine(storage: storage, stateURL: folder.appendingPathComponent("data-b.json"))
+        var input = BackupPayload()
+        input.bookSources = [BookSource(bookSourceUrl: "https://source.test", bookSourceName: "初始")]
+        input.bookNotes = [BookNote(id: "note", bookUrl: "book", quote: "划线")]
+        input.replaceRules = [ReplaceRule(id: 1, name: "规则", pattern: "a", replacement: "b")]
+        let published = try await first.synchronize(input)
+        try await first.acknowledge(published)
+        let imported = try await second.synchronize(BackupPayload())
+        try await second.acknowledge(imported)
+        XCTAssertEqual(imported.payload.bookNotes.first?.quote, "划线")
+        XCTAssertEqual(imported.payload.replaceRules.count, 1)
+
+        var edited = imported.payload
+        edited.bookSources[0].bookSourceName = "已编辑"
+        edited.bookNotes = []
+        let update = try await second.synchronize(edited)
+        try await second.acknowledge(update)
+        let merged = try await first.synchronize(input)
+        try await first.acknowledge(merged)
+        XCTAssertEqual(merged.payload.bookSources.first?.bookSourceName, "已编辑")
+        XCTAssertTrue(merged.payload.bookNotes.isEmpty)
+        let repeated = try await first.synchronize(merged.payload)
+        XCTAssertTrue(repeated.payload.bookNotes.isEmpty)
+    }
+
+    func testLibraryDataSyncPreservesEditsAndDeletionsDuringTransfer() throws {
+        var base = BackupPayload()
+        base.bookNotes = [BookNote(id: "one", bookUrl: "b", quote: "原文"), BookNote(id: "two", bookUrl: "b", quote: "旧笔记")]
+        var current = base
+        current.bookNotes.removeLast()
+        current.bookNotes[0].note = "传输时的新想法"
+        var incoming = base
+        incoming.bookNotes[0].note = "远端想法"
+        incoming.bookNotes.append(BookNote(id: "three", bookUrl: "b", quote: "新增"))
+        let merged = try LibraryDataSyncEngine.reconcile(base: base, current: current, incoming: incoming)
+        XCTAssertEqual(Set(merged.bookNotes.map(\.id)), ["one", "three"])
+        XCTAssertEqual(merged.bookNotes.first { $0.id == "one" }?.note, "传输时的新想法")
+    }
+
+    func testLibraryDataSyncDoesNotAcknowledgeFailedUploads() async throws {
+        let storage = MemoryShelfStorage()
+        let engine = LibraryDataSyncEngine(storage: storage, stateURL: folder.appendingPathComponent("failed-data.json"))
+        var input = BackupPayload()
+        input.bookSources = [BookSource(bookSourceUrl: "a", bookSourceName: "A")]
+        await storage.setFailUploads(true)
+        do {
+            _ = try await engine.synchronize(input)
+            XCTFail("Upload must fail")
+        } catch {}
+        await storage.setFailUploads(false)
+        let result = try await engine.synchronize(input)
+        try await engine.acknowledge(result)
+        let other = LibraryDataSyncEngine(storage: storage, stateURL: folder.appendingPathComponent("retry-data.json"))
+        let imported = try await other.synchronize(BackupPayload())
+        XCTAssertEqual(imported.payload.bookSources.first?.bookSourceUrl, "a")
+    }
+
+    func testLibraryDataSyncMapsLocalBookNotesAcrossDevicePaths() async throws {
+        let storage = MemoryShelfStorage()
+        let original = folder.appendingPathComponent("device-a.txt")
+        let copy = folder.appendingPathComponent("device-b.txt")
+        let content = Data("第一章\n相同正文".utf8)
+        try content.write(to: original)
+        try content.write(to: copy)
+        var firstInput = BackupPayload()
+        firstInput.books = [Book(bookUrl: original.absoluteString, name: "书", origin: "local")]
+        firstInput.bookNotes = [BookNote(id: "shared-note", bookUrl: original.absoluteString, quote: "正文")]
+        let first = LibraryDataSyncEngine(storage: storage, stateURL: folder.appendingPathComponent("notes-a.json"))
+        let published = try await first.synchronize(firstInput)
+        try await first.acknowledge(published)
+        var secondInput = BackupPayload()
+        secondInput.books = [Book(bookUrl: copy.absoluteString, name: "书", origin: "local")]
+        let second = LibraryDataSyncEngine(storage: storage, stateURL: folder.appendingPathComponent("notes-b.json"))
+        let imported = try await second.synchronize(secondInput)
+        let applied = try LibraryDataSyncEngine.reconcile(base: secondInput, current: secondInput, incoming: imported.payload)
+        XCTAssertEqual(applied.bookNotes.first?.bookUrl, copy.absoluteString)
+        XCTAssertTrue(try LibraryDataSyncEngine.hasSameData(applied, imported.payload))
+    }
+}

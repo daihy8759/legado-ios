@@ -31,6 +31,14 @@ struct ReaderView: View {
     @State private var tocSearch = ""
     @State private var tocDescending = false
     @State private var showsContentSearch = false
+    @State private var showsBookNotes = false
+    @State private var contentSearchScope = 0
+    @State private var fullBookHits: [ChapterSearchHit] = []
+    @State private var isSearchingBook = false
+    @State private var bookSearchIndex: BookSearchIndex?
+    @State private var fullBookSearchTask: Task<Void, Never>?
+    @StateObject private var notes = BookNotesModel.live()
+    @State private var selectionNote: BookNote?
     @State private var showsReplaceRules = false
     @State private var showsReaderSettings = false
     @State private var showsClickActionSettings = false
@@ -236,6 +244,12 @@ struct ReaderView: View {
             backgroundImage = ReaderBackgroundStore.load()
             ReaderScreenOrientation.apply(screenOrientation)
             Task { await loadHTTPEngines() }
+            if bookSearchIndex == nil, let database = try? LegadoDatabase(url: LegadoDatabase.defaultURL()) {
+                let index = BookSearchIndex(database: database)
+                bookSearchIndex = index
+                model.searchIndex = index
+            }
+            Task { await notes.load(bookURL: book.bookUrl) }
             if ProcessInfo.processInfo.arguments.contains("-uiDemoBookmarks") {
                 showsBookmarks = true
             }
@@ -272,6 +286,22 @@ struct ReaderView: View {
         }
         .sheet(isPresented: $showsTableOfContents) { tableOfContents }
         .sheet(isPresented: $showsBookmarks) { bookmarksSheet }
+        .sheet(isPresented: $showsBookNotes) {
+            BookNotesView(
+                book: book,
+                chapter: model.currentChapter,
+                paragraphs: model.paragraphs,
+                model: notes
+            ) { readerRenderRevision &+= 1 }
+        }
+        .sheet(item: $selectionNote) { note in
+            NoteComposerView(book: book, chapter: model.currentChapter, paragraphs: model.paragraphs, existing: note) { updated in
+                Task { await notes.save(updated) }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .legadoDataDidImport)) { _ in
+            Task { await notes.load(bookURL: book.bookUrl) }
+        }
         .sheet(item: $illustrationChapter) { chapter in
             EPUBIllustrationsView(book: book, chapter: chapter)
         }
@@ -556,7 +586,13 @@ struct ReaderView: View {
                     let resolved = min(max(position, 0), model.content.utf16.count)
                     if readerPosition != resolved { readerPosition = resolved }
                 },
-                onRetainChapters: { model.retainContinuousChapters($0) }
+                onRetainChapters: { model.retainContinuousChapters($0) },
+                highlights: Dictionary(uniqueKeysWithValues: model.scrollChapters.map {
+                    ($0.id, notes.highlights(bookURL: book.bookUrl, chapterIndex: $0.id))
+                }),
+                onSelectionNote: { chapter, quote, offset, writesIdea in
+                    captureSelection(quote, offset: offset, writesIdea: writesIdea, chapterIndex: chapter)
+                }
             )
         } else {
             readerTextConfiguration
@@ -618,6 +654,7 @@ struct ReaderView: View {
             autoFlipInterval: Double(autoFlipSpeed),
             isLoadingNextChapter: isWaitingForNextChapter,
             secondsPerScreen: Double(autoReadSpeed),
+            highlights: notes.highlights(bookURL: book.bookUrl, chapterIndex: model.currentIndex),
             onReachedEnd: { boundaryPosition in
                 if pageAnimation == 3 {
                     requestNextChapter()
@@ -667,8 +704,21 @@ struct ReaderView: View {
             onDeferredRender: { readerRenderRevision &+= 1 },
             onCancelNextLoading: { isWaitingForNextChapter = false },
             onPageChanged: pageDidChange,
-            onTapAction: handleTapAction
+            onTapAction: handleTapAction,
+            onSelectionNote: { quote, offset, writesIdea in
+                captureSelection(quote, offset: offset, writesIdea: writesIdea, chapterIndex: model.currentIndex)
+            }
         )
+    }
+
+    private func captureSelection(_ quote: String, offset: Int, writesIdea: Bool, chapterIndex: Int) {
+        guard model.chapters.indices.contains(chapterIndex) else { return }
+        let chapter = model.chapters[chapterIndex]
+        let note = BookNote(bookUrl: book.bookUrl, bookName: book.name, bookAuthor: book.author,
+                            chapterIndex: chapter.index, chapterName: chapter.title,
+                            quote: quote, startOffset: offset, endOffset: offset + (quote as NSString).length)
+        if writesIdea { selectionNote = note }
+        else { Task { await notes.save(note) } }
     }
 
     @ViewBuilder private var readerMenuDismissOverlay: some View {
@@ -887,6 +937,10 @@ struct ReaderView: View {
             Button("书签列表", systemImage: "bookmark") {
                 showsReaderMenu = false
                 showsBookmarks = true
+            }
+            Button("笔记", systemImage: "highlighter") {
+                showsReaderMenu = false
+                showsBookNotes = true
             }
             if isAutoFlipping {
                 Button("停止自动翻页", systemImage: "stop") {
@@ -1929,36 +1983,113 @@ struct ReaderView: View {
 
     private var contentSearchSheet: some View {
         ReadingNavigationStack {
-            Group {
-                if contentSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    ReadingUnavailableView("搜索正文", systemImage: "magnifyingglass", description: Text("输入本章正文关键字"))
-                } else if contentSearchResults.isEmpty {
-                    ReadingUnavailableView.search(text: contentSearchQuery)
-                } else {
-                    List(contentSearchResults) { paragraph in
-                        Button {
-                            readerPosition = paragraph.id
-                            readerJumpPosition = nil
-                            DispatchQueue.main.async { readerJumpPosition = paragraph.id }
-                            showsContentSearch = false
-                        } label: {
-                            Text(paragraph.text)
-                                .foregroundStyle(.primary)
-                                .lineLimit(3)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(spacing: 0) {
+                Picker("范围", selection: $contentSearchScope) {
+                    Text("本章").tag(0)
+                    Text("全书").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .onChange(of: contentSearchScope) { _ in
+                    if contentSearchScope == 1 { runFullBookSearch() }
+                }
+
+                Group {
+                    if contentSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        ReadingUnavailableView(
+                            "搜索正文",
+                            systemImage: "magnifyingglass",
+                            description: Text(contentSearchScope == 0 ? "输入本章正文关键字" : "搜索本地书全文和已缓存章节；未下载的在线正文需先缓存")
+                        )
+                    } else if contentSearchScope == 0 {
+                        if contentSearchResults.isEmpty {
+                            ReadingUnavailableView.search(text: contentSearchQuery)
+                        } else {
+                            List(contentSearchResults) { paragraph in
+                                Button {
+                                    readerPosition = paragraph.id
+                                    readerJumpPosition = nil
+                                    DispatchQueue.main.async { readerJumpPosition = paragraph.id }
+                                    showsContentSearch = false
+                                } label: {
+                                    Text(paragraph.text)
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(3)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                        }
+                    } else {
+                        if isSearchingBook {
+                            HStack { ProgressView(); Text("正在搜索…").foregroundStyle(.secondary) }
+                                .padding(.top, 24)
+                        } else if fullBookHits.isEmpty {
+                            ReadingUnavailableView.search(text: contentSearchQuery)
+                        } else {
+                            List(fullBookHits) { hit in
+                                Button {
+                                    jumpToSearchHit(hit)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(hit.chapterName).font(.footnote).foregroundStyle(.secondary)
+                                        Text(hit.snippet)
+                                            .foregroundStyle(.primary)
+                                            .lineLimit(3)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
                         }
                     }
                 }
             }
             .navigationTitle("正文搜索")
             .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $contentSearchQuery, prompt: "搜索本章")
+            .searchable(text: $contentSearchQuery, prompt: contentSearchScope == 0 ? "搜索本章" : "搜索全书")
+            .onChange(of: contentSearchQuery) { _ in
+                if contentSearchScope == 1 { runFullBookSearch() }
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { showsContentSearch = false }
                 }
             }
         }
+    }
+
+    private func runFullBookSearch() {
+        let query = contentSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        fullBookSearchTask?.cancel()
+        guard !query.isEmpty, let bookSearchIndex else {
+            fullBookHits = []
+            isSearchingBook = false
+            return
+        }
+        isSearchingBook = true
+        fullBookSearchTask = Task {
+            try? await bookSearchIndex.indexAvailableContent(book: book, chapters: model.chapters,
+                                                           rules: model.usesReplaceRules ? replaceRules.rules : [])
+            guard !Task.isCancelled else { return }
+            let hits = (try? await bookSearchIndex.search(query, bookURL: book.bookUrl, limit: 60)) ?? []
+            guard !Task.isCancelled else { return }
+            if contentSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines) == query {
+                fullBookHits = hits
+            }
+            isSearchingBook = false
+        }
+    }
+
+    private func jumpToSearchHit(_ hit: ChapterSearchHit) {
+        showsContentSearch = false
+        guard let target = model.chapters.firstIndex(where: { !$0.isVolume && $0.index == hit.chapterIndex })
+            ?? model.chapters.firstIndex(where: { !$0.isVolume && $0.title == hit.chapterName }) else { return }
+        stopSpeechIfNeeded()
+        saveProgress(immediate: true)
+        model.select(index: target, position: hit.position)
+        readerPosition = hit.position
+        readerJumpPosition = hit.position
+        showsContentSearch = false
     }
 
     private var contentSearchResults: [ReaderParagraph] {

@@ -6,6 +6,35 @@ import UIKit
 @preconcurrency import ReadiumStreamer
 @preconcurrency import ReadiumNavigator
 
+private final class AnnotatingEPUBHost: UIViewController {
+    let navigator: EPUBNavigatorViewController
+    var onNoteSelection: ((Locator, Bool) -> Void)?
+
+    init(navigator: EPUBNavigatorViewController) {
+        self.navigator = navigator
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        addChild(navigator)
+        navigator.view.frame = view.bounds
+        navigator.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(navigator.view)
+        navigator.didMove(toParent: self)
+    }
+
+    @objc func highlightSelection(_ sender: Any?) {
+        if let locator = navigator.currentSelection?.locator { onNoteSelection?(locator, false) }
+    }
+
+    @objc func annotateSelection(_ sender: Any?) {
+        if let locator = navigator.currentSelection?.locator { onNoteSelection?(locator, true) }
+    }
+}
+
 /// EPUB keeps its XHTML, CSS, SVG, images and navigation in Readium. The text
 /// reader remains available for the app's existing speech and text tools.
 @MainActor
@@ -17,6 +46,7 @@ final class EPUBReaderModel: ObservableObject, EPUBNavigatorDelegate {
     }
 
     @Published private(set) var navigator: EPUBNavigatorViewController?
+    var onNoteSelection: ((Locator, Bool) -> Void)?
     @Published private(set) var location: Locator?
     @Published private(set) var tableOfContents: [TOCEntry] = []
     @Published private(set) var errorMessage: String?
@@ -73,7 +103,10 @@ final class EPUBReaderModel: ObservableObject, EPUBNavigatorDelegate {
             }
             let controller = try EPUBNavigatorViewController(
                 publication: publication, initialLocation: initialLocation,
-                config: .init(preferences: preferences)
+                config: .init(preferences: preferences, editingActions: EditingAction.defaultActions + [
+                    EditingAction(title: "高亮", action: #selector(AnnotatingEPUBHost.highlightSelection(_:))),
+                    EditingAction(title: "写想法", action: #selector(AnnotatingEPUBHost.annotateSelection(_:)))
+                ])
             )
             controller.delegate = self
             controller.view.accessibilityIdentifier = "reader.epub"
@@ -98,6 +131,14 @@ final class EPUBReaderModel: ObservableObject, EPUBNavigatorDelegate {
     }
 
     func apply(_ preferences: EPUBPreferences) { navigator?.submitPreferences(preferences) }
+
+    func applyNotes(_ notes: [BookNote]) {
+        let decorations: [Decoration] = notes.compactMap { note in
+            guard let json = note.epubLocation, let locator = try? Locator(jsonString: json) else { return nil }
+            return Decoration(id: note.id, locator: locator, style: .highlight(tint: ReaderHighlight.uiColor(note.color)))
+        }
+        navigator?.apply(decorations: decorations, in: "book-notes")
+    }
 
     func go(to link: ReadiumShared.Link) async {
         guard let navigator else { return }
@@ -171,6 +212,9 @@ struct EPUBReaderView: View {
     @State private var sliderProgress = 0.0
     @State private var isScrubbing = false
     @State private var saveTask: Task<Void, Never>?
+    @StateObject private var notes = BookNotesModel.live()
+    @State private var selectionNote: BookNote?
+    @State private var showsNotes = false
     @AppStorage("epubFontScale") private var fontScale = 1.0
     @AppStorage("epubScroll") private var scroll = false
     @AppStorage("epubPublisherStyles") private var publisherStyles = true
@@ -192,7 +236,7 @@ struct EPUBReaderView: View {
             if model.showsControls { topBar }
             Group {
                 if let navigator = model.navigator {
-                    EPUBNavigatorHost(navigator: navigator)
+                    EPUBNavigatorHost(navigator: navigator, onNoteSelection: { model.onNoteSelection?($0, $1) })
                 } else if let error = model.errorMessage {
                     VStack(spacing: 16) {
                         Text("无法打开 EPUB").font(.headline)
@@ -225,7 +269,18 @@ struct EPUBReaderView: View {
             }
             activity.beginReading(model.book)
             await model.open(preferences: preferences)
+            await notes.load(bookURL: model.book.bookUrl)
+            model.applyNotes(notes.notes)
+            model.onNoteSelection = { locator, writesIdea in
+                let note = BookNote(bookUrl: model.book.bookUrl, bookName: model.book.name, bookAuthor: model.book.author,
+                                    chapterIndex: model.currentChapter?.index ?? 0,
+                                    chapterName: model.currentChapter?.title ?? "", quote: locator.text.highlight ?? "",
+                                    epubLocation: locator.jsonString)
+                if writesIdea { selectionNote = note }
+                else { Task { await notes.save(note); model.applyNotes(notes.notes) } }
+            }
         }
+        .onChange(of: notes.notes) { model.applyNotes($0) }
         .onChange(of: preferences) { model.apply($0) }
         .onChange(of: scenePhase) { phase in
             if phase != .active { saveProgress(); Task { await activity.endReading(model.book) } }
@@ -241,6 +296,14 @@ struct EPUBReaderView: View {
         .sheet(isPresented: $showsTOC) { tocSheet }
         .sheet(isPresented: $showsSettings) { settingsSheet }
         .sheet(isPresented: $showsBookmarks) { bookmarksSheet }
+        .sheet(isPresented: $showsNotes) {
+            BookNotesView(book: model.book, chapter: model.currentChapter, paragraphs: [], model: notes)
+        }
+        .sheet(item: $selectionNote) { note in
+            NoteComposerView(book: model.book, chapter: model.currentChapter, paragraphs: [], existing: note) { updated in
+                Task { await notes.save(updated) }
+            }
+        }
         .fullScreenCover(isPresented: $showsTextReader, onDismiss: {
             if let book = library.books.first(where: { $0.bookUrl == model.book.bookUrl }) {
                 Task { await model.resumeAfterTextReading(book) }
@@ -276,6 +339,7 @@ struct EPUBReaderView: View {
                     }
                 }
                 Button("我的书签", systemImage: "bookmark.fill") { showsBookmarks = true }
+                Button("本书笔记", systemImage: "highlighter") { showsNotes = true }
                 Button("文字阅读与朗读", systemImage: "speaker.wave.2") { saveProgress(); showsTextReader = true }
             } label: { Image(systemName: "ellipsis.circle").font(.title3) }
             .accessibilityLabel("EPUB 更多")
@@ -379,6 +443,13 @@ struct EPUBReaderView: View {
 
 private struct EPUBNavigatorHost: UIViewControllerRepresentable {
     let navigator: EPUBNavigatorViewController
-    func makeUIViewController(context: Context) -> EPUBNavigatorViewController { navigator }
-    func updateUIViewController(_ controller: EPUBNavigatorViewController, context: Context) {}
+    let onNoteSelection: ((Locator, Bool) -> Void)?
+    func makeUIViewController(context: Context) -> AnnotatingEPUBHost {
+        let host = AnnotatingEPUBHost(navigator: navigator)
+        host.onNoteSelection = onNoteSelection
+        return host
+    }
+    func updateUIViewController(_ controller: AnnotatingEPUBHost, context: Context) {
+        controller.onNoteSelection = onNoteSelection
+    }
 }

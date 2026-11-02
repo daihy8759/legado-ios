@@ -106,6 +106,9 @@ struct RootTabView: View {
                 .tag(Tab.my)
         }
         .id(themeMode)
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("legado.openBookshelf"))) { _ in
+            selection = .bookshelf
+        }
         .readingTabBarBackground()
         .preferredColorScheme(themeMode == "2" ? .dark : (["1", "3", "4"].contains(themeMode) ? .light : nil))
         .transaction { transaction in
@@ -316,6 +319,11 @@ private struct BookshelfView: View {
                 }
                 Button("本地书", systemImage: "plus") { showsLocalImporter = true }
                 Button("书架分组", systemImage: "rectangle.3.group") { showsGroupManager = true }
+                NavigationLink {
+                    LibraryContentSearchView()
+                } label: {
+                    Label("全库正文搜索", systemImage: "doc.text.magnifyingglass")
+                }
                 Menu("书架布局", systemImage: "square.grid.2x2") {
                     layoutButton("列表", value: "list")
                     layoutButton("紧凑列表", value: "compact")
@@ -1348,8 +1356,11 @@ private struct SettingsView: View {
                             settingLink("文件管理", icon: "folder") {
                                 FileManagementView()
                             }
-                            settingLink("远端存储", icon: "externaldrive.connected.to.line.below", showsSeparator: false) {
+                            settingLink("远端存储", icon: "externaldrive.connected.to.line.below") {
                                 RemoteStorageView()
+                            }
+                            settingLink("备份与恢复", icon: "externaldrive.badge.timemachine", showsSeparator: false) {
+                                BackupRestoreView()
                             }
                         }
                         supportSection
@@ -1473,6 +1484,7 @@ private struct SettingsView: View {
             .accessibilityIdentifier("profile.appearance")
             settingLink("在线朗读", icon: "waveform") { HttpTTSManagementView() }
             settingLink("书签", icon: "bookmark") { AllBookmarksView() }
+            settingLink("笔记", icon: "highlighter") { AllNotesView() }
             settingLink("阅读记录", icon: "clock", showsSeparator: false) {
                 ReadingHistoryView()
             }
@@ -1879,7 +1891,7 @@ private struct BookmarkEditorView: View {
     }
 }
 
-private struct BookmarkReaderDestination: View {
+struct BookmarkReaderDestination: View {
     let book: Book
     let bookmark: Bookmark
     let source: BookSource?
@@ -1964,6 +1976,88 @@ private struct BookmarkReaderDestination: View {
 
     private static func chapterCoordinator() -> BookUpdateCoordinator {
         BookUpdateCoordinator(repository: AppBookChapterRepository.live())
+    }
+}
+
+private struct LibraryContentSearchView: View {
+    @EnvironmentObject private var library: BookLibraryModel
+    @EnvironmentObject private var sources: SourceLibraryModel
+    @EnvironmentObject private var rules: ReplaceRuleLibraryModel
+    @State private var query = ""
+    @State private var hits: [ChapterSearchHit] = []
+    @State private var index: BookSearchIndex?
+    @State private var isIndexing = true
+    @State private var errorMessage: String?
+
+    private var matchedBooks: [Book] {
+        library.books.filter { book in hits.contains { $0.bookURL == book.bookUrl } }
+    }
+
+    var body: some View {
+        List {
+            Section {
+                Text("搜索本地 TXT / EPUB 全文与已缓存的在线章节。在线书未下载的正文需先缓存。")
+                    .font(.footnote).foregroundStyle(.secondary)
+                if isIndexing { ProgressView("正在建立全文索引…") }
+                if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
+            }
+            ForEach(matchedBooks) { book in
+                Section(book.name) {
+                    ForEach(hits.filter { $0.bookURL == book.bookUrl }) { hit in
+                        NavigationLink {
+                            BookmarkReaderDestination(book: book, bookmark: bookmark(hit, book: book),
+                                                      source: sources.sources.first { $0.bookSourceUrl == book.origin && $0.enabled })
+                        } label: {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(hit.chapterName).font(.subheadline)
+                                Text(hit.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                            }
+                        }
+                    }
+                }
+            }
+            if !query.isEmpty, hits.isEmpty, !isIndexing {
+                Text("没有找到匹配正文").foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("全库正文搜索")
+        .searchable(text: $query, prompt: "正文关键词")
+        .task {
+            do {
+                let database = try LegadoDatabase(url: LegadoDatabase.defaultURL())
+                let searchIndex = BookSearchIndex(database: database)
+                index = searchIndex
+                for book in library.books {
+                    try Task.checkCancellation()
+                    let chapters: [BookChapter]
+                    if book.origin == "local" {
+                        chapters = try LocalBookService.live().loadChapters(book: book).chapters
+                    } else { chapters = try await database.loadChapters(bookURL: book.bookUrl) }
+                    try await searchIndex.indexAvailableContent(book: book, chapters: chapters, rules: rules.rules)
+                }
+            } catch is CancellationError { return }
+            catch { errorMessage = error.localizedDescription }
+            isIndexing = false
+            await search()
+        }
+        .task(id: query) { await search() }
+    }
+
+    private func search() async {
+        do {
+            let captured = query
+            let results = try await index?.search(captured, limit: 500) ?? []
+            guard !Task.isCancelled, query == captured else { return }
+            hits = results.filter { hit in library.books.contains { $0.bookUrl == hit.bookURL } }
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    private func bookmark(_ hit: ChapterSearchHit, book: Book) -> Bookmark {
+        var value = Bookmark(time: 0, bookName: book.name, bookAuthor: book.author)
+        value.chapterIndex = hit.chapterIndex
+        value.chapterName = hit.chapterName
+        value.chapterPosition = hit.position
+        return value
     }
 }
 

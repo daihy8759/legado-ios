@@ -66,7 +66,7 @@ struct RemoteStorageView: View {
                     Text(status).font(.footnote).foregroundStyle(.secondary)
                 }
             } header: { Text("书架与阅读进度") } footer: {
-                Text("各设备选择同一存储目录后合并书架、分组、删除记录及 TXT / EPUB 阅读位置，并传输本地书原文件。自动同步在启动、回到前台及书架变化后执行；退出前台时尝试完成上传。在线书所需书源请在各设备分别导入。")
+                Text("各设备选择同一存储目录后合并书架、分组、阅读位置、本地书原文件，以及书源、净化规则、书签、笔记、统计、在线朗读和 RSS 配置。自动同步在启动、回到前台及数据变化后执行；退出前台时尝试完成上传。登录状态、Cookie 与远端存储凭据保留在本机。")
             }
             Section {
                 if model.servers.isEmpty {

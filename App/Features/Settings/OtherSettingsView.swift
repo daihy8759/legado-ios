@@ -9,6 +9,10 @@ struct OtherSettingsView: View {
     @State private var maintenance: Maintenance?
     @State private var isWorking = false
     @State private var message: String?
+    @State private var notifyEnabled = ChapterUpdateNotifier.shared.isEnabled
+    @AppStorage("chapterQuietHours") private var quietHours = false
+    @AppStorage("chapterQuietStart") private var quietStart = 22
+    @AppStorage("chapterQuietEnd") private var quietEnd = 8
 
     private enum Maintenance: String, Identifiable {
         case webCache = "清理网页缓存"
@@ -27,6 +31,33 @@ struct OtherSettingsView: View {
                 }
                 Toggle("启动时更新书架", isOn: $autoRefresh)
                 Toggle("自动更新仅检查读过的书", isOn: $onlyUpdateRead).disabled(!autoRefresh)
+            }
+            Section {
+                Toggle("章节更新提醒", isOn: Binding(
+                    get: { notifyEnabled },
+                    set: { value in
+                        Task {
+                            let applied = await ChapterUpdateNotifier.shared.setEnabled(value)
+                            notifyEnabled = applied && value
+                            if value && !applied {
+                                message = "系统未允许通知。可在「设置 → 通知 → 小浣熊阅读」里开启后再试。"
+                            }
+                        }
+                    }
+                ))
+                Toggle("免打扰时段", isOn: $quietHours).disabled(!notifyEnabled)
+                if quietHours {
+                    Picker("开始时间", selection: $quietStart) {
+                        ForEach(0..<24, id: \.self) { Text("\($0):00").tag($0) }
+                    }
+                    Picker("结束时间", selection: $quietEnd) {
+                        ForEach(0..<24, id: \.self) { Text("\($0):00").tag($0) }
+                    }
+                }
+            } header: {
+                Text("通知")
+            } footer: {
+                Text("发现新章节时发送本地通知，角标显示尚未阅读的更新章节数。免打扰期间的提醒延后到结束时发送。后台更新由系统择机执行。")
             }
             Section("网络与存储") {
                 NavigationLink {

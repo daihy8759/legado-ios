@@ -1,4 +1,5 @@
 import SwiftUI
+import BackgroundTasks
 
 @main
 struct LegadoApp: App {
@@ -20,9 +21,13 @@ struct LegadoApp: App {
         _sourceLibrary = StateObject(wrappedValue: demo
             ? SourceLibraryModel.demo(sources: DemoContent.sources)
             : SourceLibraryModel.live())
-        _bookLibrary = StateObject(wrappedValue: demo
+        let bookLibrary = demo
             ? BookLibraryModel.demo(books: DemoContent.books)
-            : BookLibraryModel.live())
+            : BookLibraryModel.live()
+        bookLibrary.onNewChapters = { [weak bookLibrary] _, updates in
+            ChapterUpdateNotifier.shared.notify(updates: updates, unreadCount: bookLibrary?.books.reduce(0) { $0 + max($1.lastCheckCount, 0) } ?? 0)
+        }
+        _bookLibrary = StateObject(wrappedValue: bookLibrary)
         _replaceRuleLibrary = StateObject(wrappedValue: demo
             ? ReplaceRuleLibraryModel.demo()
             : ReplaceRuleLibraryModel.live())
@@ -43,12 +48,35 @@ struct LegadoApp: App {
                 .environmentObject(rssLibrary)
                 .environmentObject(ruleSubscriptions)
                 .environmentObject(bookshelfSync)
-                .onReceive(bookLibrary.$books.dropFirst()) { _ in bookshelfSync.schedule(bookLibrary) }
+                .onReceive(bookLibrary.$books.dropFirst()) { books in
+                    bookshelfSync.schedule(bookLibrary)
+                    ChapterUpdateNotifier.shared.updateBadge(books.reduce(0) { $0 + max($1.lastCheckCount, 0) })
+                }
                 .onReceive(bookLibrary.$groups.dropFirst()) { _ in bookshelfSync.schedule(bookLibrary) }
+                .onReceive(sourceLibrary.$sources.dropFirst()) { _ in bookshelfSync.schedule(bookLibrary) }
+                .onReceive(replaceRuleLibrary.$rules.dropFirst()) { _ in bookshelfSync.schedule(bookLibrary) }
+                .onReceive(readingActivity.$bookmarks.dropFirst()) { _ in bookshelfSync.schedule(bookLibrary) }
+                .onReceive(readingActivity.$readRecords.dropFirst()) { _ in bookshelfSync.schedule(bookLibrary) }
+                .onReceive(rssLibrary.$sources.dropFirst()) { _ in bookshelfSync.schedule(bookLibrary) }
+                .onReceive(ruleSubscriptions.$values.dropFirst()) { _ in bookshelfSync.schedule(bookLibrary) }
+                .onReceive(NotificationCenter.default.publisher(for: Notification.Name("legado.libraryDataDidChange")).receive(on: DispatchQueue.main)) { _ in
+                    bookshelfSync.schedule(bookLibrary)
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .legadoDataDidImport)) { _ in
+                    Task {
+                        await sourceLibrary.reload()
+                        await bookLibrary.load()
+                        await replaceRuleLibrary.load()
+                        await readingActivity.load()
+                        await ruleSubscriptions.load()
+                        await rssLibrary.load()
+                    }
+                }
                 .onChange(of: scenePhase) { phase in
                     if phase == .active {
                         Task { await bookshelfSync.synchronizeIfAutomatic(bookLibrary) }
                     } else if phase == .background {
+                        ChapterUpdateNotifier.shared.scheduleBackgroundRefresh()
                         Task { await bookshelfSync.enteringBackground(bookLibrary) }
                     }
                 }
@@ -100,6 +128,31 @@ struct LegadoApp: App {
 }
 
 final class LegadoAppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        _ = ChapterUpdateNotifier.shared
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: ChapterUpdateNotifier.backgroundTaskID, using: nil) { task in
+            Task { @MainActor in
+                let refresh = Task { @MainActor in
+                    let library = BookLibraryModel.live()
+                    let sources = SourceLibraryModel.live()
+                    await library.load()
+                    await sources.load()
+                    library.onNewChapters = { [weak library] _, updates in
+                        let unread = library?.books.reduce(0) { $0 + max($1.lastCheckCount, 0) } ?? 0
+                        ChapterUpdateNotifier.shared.notify(updates: updates, unreadCount: unread)
+                    }
+                    if ChapterUpdateNotifier.shared.isEnabled {
+                        await library.checkForUpdates(sources: sources.sources, onlyRead: UserDefaults.standard.bool(forKey: "onlyUpdateRead"))
+                    }
+                    task.setTaskCompleted(success: !Task.isCancelled)
+                    ChapterUpdateNotifier.shared.scheduleBackgroundRefresh()
+                }
+                task.expirationHandler = { refresh.cancel() }
+            }
+        }
+        return true
+    }
+
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
         ReaderScreenOrientation.supportedOrientations
     }

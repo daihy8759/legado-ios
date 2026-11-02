@@ -446,7 +446,7 @@ public actor BookshelfSyncEngine {
         }
     }
     static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
-    private static func fileDigest(_ url: URL) throws -> String {
+    static func fileDigest(_ url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hash = SHA256()
@@ -455,5 +455,214 @@ public actor BookshelfSyncEngine {
             hash.update(data: chunk)
         }
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+public struct LibraryDataSyncResult: Sendable {
+    public let payload: BackupPayload
+    fileprivate let checkpoint: LibraryDataSyncState
+}
+
+fileprivate struct LibraryDataSyncRecord: Codable, Sendable {
+    var data: Data?
+    var stamp: ShelfSyncStamp
+}
+
+private struct LibraryDataSyncSnapshot: Codable, Sendable {
+    var version = 1
+    var device: String
+    var revision: Int64
+    var records: [String: LibraryDataSyncRecord]
+}
+
+fileprivate struct LibraryDataSyncState: Codable, Sendable {
+    var device = UUID().uuidString.lowercased()
+    var clock: Int64 = 0
+    var records: [String: LibraryDataSyncRecord] = [:]
+    var baseline: [String: Data] = [:]
+}
+
+public actor LibraryDataSyncEngine {
+    private let storage: any BookshelfSyncStorage
+    private let stateURL: URL
+    private var running = false
+    private static let namespaces = ["sources", "rules", "bookmarks", "stats", "notes", "configuration"]
+
+    public init(storage: any BookshelfSyncStorage, stateURL: URL) {
+        self.storage = storage
+        self.stateURL = stateURL
+    }
+
+    public func synchronize(_ input: BackupPayload) async throws -> LibraryDataSyncResult {
+        guard !running else { throw BookshelfSyncError.busy }
+        running = true
+        defer { running = false }
+        var state = FileManager.default.fileExists(atPath: stateURL.path)
+            ? try JSONDecoder().decode(LibraryDataSyncState.self, from: Data(contentsOf: stateURL))
+            : LibraryDataSyncState()
+        guard state.clock >= 0, state.clock < Int64.max - 2 else { throw BookshelfSyncError.invalidSnapshot }
+        let captured = try Self.records(input)
+        state.clock = max(state.clock + 1, Int64(Date().timeIntervalSince1970 * 1_000))
+        let reserved = state
+        try save(reserved)
+        let stamp = ShelfSyncStamp(time: state.clock, device: state.device)
+        var changed = false
+        for (key, data) in captured where state.baseline[key] != data {
+            state.records[key] = .init(data: data, stamp: stamp)
+            changed = true
+        }
+        for key in state.baseline.keys where captured[key] == nil {
+            state.records[key] = .init(data: nil, stamp: stamp)
+            changed = true
+        }
+        for path in ["LegadoSync", BookshelfSyncEngine.directory] {
+            try await ensureDirectory(path)
+        }
+        for namespace in Self.namespaces {
+            let folder = BookshelfSyncEngine.directory + "/" + namespace
+            try await ensureDirectory(folder)
+            var latest: [String: RemoteFile] = [:]
+            for file in try await storage.list(folder) where !file.isDirectory {
+                let parts = file.name.split(separator: "_")
+                guard parts.count == 3, UUID(uuidString: String(parts[0])) != nil,
+                      Int64(parts[1]) != nil, file.name.hasSuffix(".json") else { continue }
+                let device = String(parts[0])
+                if latest[device] == nil || latest[device]!.name < file.name { latest[device] = file }
+            }
+            for (device, file) in latest.sorted(by: { $0.key < $1.key }) {
+                let data = try await storage.download(file.path)
+                guard data.count <= 32 * 1_024 * 1_024 else { throw BookshelfSyncError.invalidSnapshot }
+                let snapshot = try JSONDecoder().decode(LibraryDataSyncSnapshot.self, from: data)
+                guard snapshot.version == 1, snapshot.device == device, snapshot.revision >= 0,
+                      snapshot.revision < Int64.max - 2, snapshot.records.count <= 100_000,
+                      Int64(file.name.split(separator: "_")[1]) == snapshot.revision else {
+                    throw BookshelfSyncError.invalidSnapshot
+                }
+                for (key, record) in snapshot.records {
+                    guard key.hasPrefix(namespace + "/"), record.stamp.time >= 0,
+                          record.stamp.time <= snapshot.revision, record.stamp.sequence >= 0,
+                          UUID(uuidString: record.stamp.device) != nil else { throw BookshelfSyncError.invalidSnapshot }
+                    if state.records[key] == nil || state.records[key]!.stamp < record.stamp {
+                        state.records[key] = record
+                    }
+                }
+                state.clock = max(state.clock, snapshot.revision)
+            }
+        }
+        let values = state.records.compactMapValues(\.data)
+        var payload = try Self.payload(values)
+        payload.books = input.books
+        if changed {
+            guard state.clock < Int64.max - 2 else { throw BookshelfSyncError.invalidSnapshot }
+            state.clock += 1
+            var reservation = reserved
+            reservation.clock = state.clock
+            try save(reservation)
+            for namespace in Self.namespaces {
+                let snapshot = LibraryDataSyncSnapshot(
+                    device: state.device, revision: state.clock,
+                    records: state.records.filter { $0.key.hasPrefix(namespace + "/") }
+                )
+                let data = try Self.encode(snapshot)
+                guard data.count <= 32 * 1_024 * 1_024 else { throw BookshelfSyncError.invalidSnapshot }
+                let name = state.device + "_" + String(format: "%020lld", state.clock) + "_" + UUID().uuidString + ".json"
+                try await storage.upload(data, to: BookshelfSyncEngine.directory + "/" + namespace + "/" + name)
+            }
+        }
+        state.baseline = values
+        return LibraryDataSyncResult(payload: payload, checkpoint: state)
+    }
+
+    public func acknowledge(_ result: LibraryDataSyncResult) throws { try save(result.checkpoint) }
+
+    public static func reconcile(base: BackupPayload, current: BackupPayload, incoming: BackupPayload) throws -> BackupPayload {
+        let original = try records(base)
+        let local = try records(current)
+        var result = try records(incoming)
+        for key in Set(original.keys).union(local.keys) where original[key] != local[key] {
+            result[key] = local[key]
+        }
+        var merged = try payload(result)
+        let localURLs = try localBookURLs(current.books)
+        for index in merged.bookNotes.indices {
+            if let url = localURLs[merged.bookNotes[index].bookUrl] { merged.bookNotes[index].bookUrl = url }
+        }
+        merged.books = current.books
+        return merged
+    }
+
+    public static func hasSameData(_ first: BackupPayload, _ second: BackupPayload) throws -> Bool {
+        try records(first) == records(second)
+    }
+
+    private static func records(_ payload: BackupPayload) throws -> [String: Data] {
+        var result: [String: Data] = [:]
+        func append<Value: Encodable>(_ values: [Value], namespace: String, key: (Value) -> String) throws {
+            for value in values {
+                let identifier = namespace + "/" + key(value)
+                guard result[identifier] == nil else { throw BookshelfSyncError.invalidSnapshot }
+                result[identifier] = try encode(value)
+            }
+        }
+        try append(payload.bookSources, namespace: "sources", key: \.bookSourceUrl)
+        try append(payload.replaceRules, namespace: "rules", key: { "replace/\($0.id)" })
+        try append(payload.txtTocRules, namespace: "rules", key: { "toc/\($0.id)" })
+        try append(payload.bookmarks, namespace: "bookmarks", key: { String($0.time) })
+        try append(payload.readRecords, namespace: "stats", key: \.id)
+        let canonicalURLs = try Dictionary(localBookURLs(payload.books).map { ($0.value, $0.key) }, uniquingKeysWith: { first, _ in first })
+        let notes = payload.bookNotes.map { note in
+            var value = note
+            value.bookUrl = canonicalURLs[note.bookUrl] ?? note.bookUrl
+            return value
+        }
+        try append(notes, namespace: "notes", key: \.id)
+        try append(payload.httpTTS, namespace: "configuration", key: { "tts/\($0.id)" })
+        try append(payload.ruleSubs, namespace: "configuration", key: { "subscription/\($0.id)" })
+        try append(payload.rssSources, namespace: "configuration", key: { "rss/" + $0.sourceUrl })
+        return result
+    }
+
+    private static func payload(_ records: [String: Data]) throws -> BackupPayload {
+        func decode<Value: Decodable>(_ type: Value.Type, prefix: String) throws -> [Value] {
+            try records.sorted { $0.key < $1.key }.filter { $0.key.hasPrefix(prefix) }
+                .map { try JSONDecoder().decode(type, from: $0.value) }
+        }
+        var result = BackupPayload()
+        result.bookSources = try decode(BookSource.self, prefix: "sources/")
+        result.replaceRules = try decode(ReplaceRule.self, prefix: "rules/replace/")
+        result.txtTocRules = try decode(TxtTocRule.self, prefix: "rules/toc/")
+        result.bookmarks = try decode(Bookmark.self, prefix: "bookmarks/")
+        result.readRecords = try decode(ReadRecord.self, prefix: "stats/")
+        result.bookNotes = try decode(BookNote.self, prefix: "notes/")
+        result.httpTTS = try decode(HttpTTS.self, prefix: "configuration/tts/")
+        result.ruleSubs = try decode(RuleSub.self, prefix: "configuration/subscription/")
+        result.rssSources = try decode(RssSource.self, prefix: "configuration/rss/")
+        return result
+    }
+
+    private static func encode<Value: Encodable>(_ value: Value) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(value)
+    }
+
+    private static func localBookURLs(_ books: [Book]) throws -> [String: String] {
+        var urls: [String: String] = [:]
+        for book in books where book.origin == "local" {
+            guard let url = URL(string: book.bookUrl), url.isFileURL, FileManager.default.fileExists(atPath: url.path) else { continue }
+            let key = try "local:" + BookshelfSyncEngine.fileDigest(url) + "." + url.pathExtension.lowercased()
+            urls[key] = book.bookUrl
+        }
+        return urls
+    }
+
+    private func save(_ state: LibraryDataSyncState) throws {
+        try FileManager.default.createDirectory(at: stateURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Self.encode(state).write(to: stateURL, options: .atomic)
+    }
+
+    private func ensureDirectory(_ path: String) async throws {
+        do { try await storage.createDirectory(path) }
+        catch RemoteStorageError.http(let code) where [405, 409, 412].contains(code) { _ = try await storage.list(path) }
     }
 }

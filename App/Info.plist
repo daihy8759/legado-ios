@@ -89,6 +89,11 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+		<string>fetch</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>org.legado.ios.chapter-refresh</string>
 	</array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>

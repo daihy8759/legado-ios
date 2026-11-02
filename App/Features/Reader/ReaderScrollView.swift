@@ -11,6 +11,8 @@ struct ReaderScrollView: UIViewRepresentable {
     let onNeedChapters: (Int) -> Void
     let onPositionChanged: (Int, Int) -> Void
     let onRetainChapters: (Set<Int>) -> Void
+    var highlights: [Int: [ReaderHighlight]] = [:]
+    var onSelectionNote: ((Int, String, Int, Bool) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -52,6 +54,7 @@ struct ReaderScrollView: UIViewRepresentable {
         private var reachedEnd = false
         private weak var readerTap: UITapGestureRecognizer?
         private weak var readerLongPress: UILongPressGestureRecognizer?
+        private var selectionMenu: AnyObject?
         #if DEBUG
         private var decelerationInsertions = 0
         private var continuedDecelerations = 0
@@ -100,7 +103,27 @@ struct ReaderScrollView: UIViewRepresentable {
         func update(_ view: ReaderScrollCollectionView) {
             guard !applying, view.bounds.width > 0, view.bounds.height > 0 else { return }
             applying = true
-            defer { applying = false }
+            defer {
+                for (index, layout) in chapterLayouts {
+                    let text = layout.storage.string as NSString
+                    layout.manager.highlights = []
+                    for highlight in parent.highlights[index] ?? [] {
+                        var range = NSRange(location: NSNotFound, length: 0)
+                        if let offset = highlight.startOffset, offset >= 0 {
+                            let candidate = NSRange(location: layout.bodyStart + offset, length: (highlight.quote as NSString).length)
+                            if NSMaxRange(candidate) <= text.length, text.substring(with: candidate) == highlight.quote { range = candidate }
+                        }
+                        if range.location == NSNotFound {
+                            range = text.range(of: highlight.quote, range: NSRange(location: layout.bodyStart, length: text.length - layout.bodyStart))
+                        }
+                        if range.location != NSNotFound, range.length > 0 {
+                            layout.manager.highlights.append((range, ReaderHighlight.uiColor(highlight.color)))
+                        }
+                    }
+                }
+                for cell in view.visibleCells { (cell as? ReaderScrollCell)?.canvas.setNeedsDisplay() }
+                applying = false
+            }
             let config = parent.configuration
             if wasLoadingAhead, !parent.loadingAhead { requestedAhead = nil }
             if wasLoadingBehind, !parent.loadingBehind { requestedBehind = nil }
@@ -356,7 +379,39 @@ struct ReaderScrollView: UIViewRepresentable {
             guard gesture.state == .began, let view, !view.isDragging else { return }
             if view.isDecelerating { view.setContentOffset(view.contentOffset, animated: false) }
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            parent.configuration.onTapAction(0)
+            let point = gesture.location(in: view)
+            guard parent.onSelectionNote != nil,
+                  let row = (view.collectionViewLayout as? ReaderContinuousLayout)?.row(at: point.y),
+                  blocks.indices.contains(row),
+                  let cell = view.cellForItem(at: IndexPath(item: row, section: 0)) as? ReaderScrollCell else {
+                parent.configuration.onTapAction(0)
+                return
+            }
+            let block = blocks[row]
+            let pointInCell = gesture.location(in: cell.canvas)
+            let textPoint = CGPoint(x: pointInCell.x - block.chapter.left, y: pointInCell.y + block.top)
+            let character = block.chapter.manager.characterIndex(for: textPoint, in: block.chapter.container, fractionOfDistanceBetweenInsertionPoints: nil)
+            let text = block.chapter.storage.string as NSString
+            guard character >= block.chapter.bodyStart, character < text.length else { return }
+            let range = text.paragraphRange(for: NSRange(location: character, length: 0))
+            let quote = text.substring(with: range).trimmingCharacters(in: .newlines)
+            guard !quote.isEmpty else { return }
+            cell.noteAction = { [weak self] writesIdea in
+                self?.parent.onSelectionNote?(block.chapter.chapter.id, quote, max(range.location - block.chapter.bodyStart, 0), writesIdea)
+            }
+            cell.becomeFirstResponder()
+            if #available(iOS 16.0, *) {
+                (selectionMenu as? ReaderSelectionMenu)?.dismiss()
+                let menu = ReaderSelectionMenu(selectedText: quote) { [weak cell] in cell?.noteAction?($0) }
+                selectionMenu = menu
+                menu.present(on: cell, at: pointInCell)
+            } else {
+                UIMenuController.shared.menuItems = [
+                    UIMenuItem(title: "高亮", action: #selector(ReaderScrollCell.highlightSelection)),
+                    UIMenuItem(title: "写想法", action: #selector(ReaderScrollCell.annotateSelection))
+                ]
+                UIMenuController.shared.showMenu(from: cell, rect: CGRect(origin: pointInCell, size: CGSize(width: 1, height: 1)))
+            }
         }
 
         func gestureRecognizer(
@@ -488,7 +543,7 @@ struct ReaderScrollBlock {
 final class ReaderScrollChapterLayout {
     let chapter: ReaderScrollChapter
     let storage: NSTextStorage
-    let manager = NSLayoutManager()
+    let manager = ReaderHighlightLayoutManager()
     let container: NSTextContainer
     let bodyStart: Int
     let left: CGFloat
@@ -534,6 +589,13 @@ final class ReaderScrollChapterLayout {
 @MainActor
 private final class ReaderScrollCell: UICollectionViewCell {
     let canvas = ReaderScrollCanvas()
+    var noteAction: ((Bool) -> Void)?
+    override var canBecomeFirstResponder: Bool { true }
+    @objc func highlightSelection() { noteAction?(false); resignFirstResponder() }
+    @objc func annotateSelection() { noteAction?(true); resignFirstResponder() }
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        action == #selector(highlightSelection) || action == #selector(annotateSelection)
+    }
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
@@ -542,7 +604,7 @@ private final class ReaderScrollCell: UICollectionViewCell {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func layoutSubviews() { super.layoutSubviews(); canvas.frame = contentView.bounds }
-    override func prepareForReuse() { super.prepareForReuse(); canvas.block = nil }
+    override func prepareForReuse() { super.prepareForReuse(); canvas.block = nil; noteAction = nil }
 }
 
 @MainActor

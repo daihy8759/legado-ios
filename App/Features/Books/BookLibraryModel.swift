@@ -37,6 +37,8 @@ final class BookLibraryModel: ObservableObject {
     @Published private(set) var books: [Book] = []
     @Published private(set) var groups: [BookGroup] = []
     @Published private(set) var errorMessage: String?
+    /// 检查更新后回调（总新增章节数、明细），由 App 层接到本地通知。
+    var onNewChapters: (@MainActor (Int, [(bookName: String, added: Int)]) -> Void)?
     @Published private(set) var updateMessage: String?
     @Published private(set) var isCheckingUpdates = false
 
@@ -238,12 +240,15 @@ final class BookLibraryModel: ObservableObject {
         var checked = 0
         var added = 0
         var failed = 0
+        var updates: [(bookName: String, added: Int)] = []
         for requestedBook in requestedBooks {
+            guard !Task.isCancelled else { return }
             guard let source = sourceByURL[requestedBook.origin], source.enabled else {
                 failed += 1
                 continue
             }
             let report = await updateCoordinator.refresh(book: requestedBook, source: source)
+            guard !Task.isCancelled else { return }
             checked += 1
             if report.refreshed {
                 // Network requests suspend this actor. Merge the new directory
@@ -259,12 +264,18 @@ final class BookLibraryModel: ObservableObject {
                     newChapters: report.chapters,
                     now: report.book.lastCheckTime
                 ).book
-                added += report.addedChapterCount
-                await persist(updated)
+                let saved = await persist(updated)
+                if saved { added += report.addedChapterCount }
+                if saved && report.addedChapterCount > 0 {
+                    updates.append((requestedBook.name, report.addedChapterCount))
+                }
+                if !saved { failed += 1 }
             } else {
                 failed += 1
             }
         }
+
+        if added > 0 { onNewChapters?(added, updates) }
 
         if checked == 0 && failed == 0 {
             updateMessage = "书架里暂时没有可更新的网络书籍。"

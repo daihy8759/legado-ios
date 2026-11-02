@@ -17,7 +17,7 @@ public enum LegadoDatabaseError: Error, LocalizedError, Sendable {
 }
 
 public actor LegadoDatabase {
-    public static let schemaVersion: Int32 = 7
+    public static let schemaVersion: Int32 = 9
 
     // SQLite is opened with FULLMUTEX and every operational access remains
     // actor-isolated. `nonisolated(unsafe)` only permits closing the handle
@@ -60,6 +60,58 @@ public actor LegadoDatabase {
     public func compact() throws {
         try Self.execute(handle, "PRAGMA wal_checkpoint(TRUNCATE)")
         try Self.execute(handle, "VACUUM")
+    }
+
+    public func backupPayload() throws -> BackupPayload {
+        var payload = BackupPayload()
+        try transaction {
+            payload.bookSources = try loadBookSources()
+            payload.books = try loadBooks()
+            payload.bookGroups = try loadBookGroups()
+            payload.bookmarks = try loadBookmarks()
+            payload.readRecords = try loadReadRecords()
+            payload.bookNotes = try loadBookNotes()
+            payload.txtTocRules = try loadTxtTocRules()
+            payload.httpTTS = try loadHttpTTS()
+            payload.ruleSubs = try loadRuleSubs()
+            payload.rssSources = try loadRssSources()
+        }
+        return payload
+    }
+
+    public func restoreBackup(_ payload: BackupPayload) throws {
+        try transaction {
+            try replaceBookSources(payload.bookSources)
+            try replaceBooks(payload.books)
+            try replaceBookGroups(payload.bookGroups)
+            try replaceBookmarks(payload.bookmarks)
+            try replaceReadRecords(payload.readRecords)
+            try replaceBookNotes(payload.bookNotes)
+            try replaceTxtTocRules(payload.txtTocRules)
+            try replaceHttpTTS(payload.httpTTS)
+            try replaceRuleSubs(payload.ruleSubs)
+            try replaceRssSources(payload.rssSources)
+        }
+    }
+
+    public func applyLibrarySync(base: BackupPayload, incoming: BackupPayload) throws -> Bool {
+        var changed = false
+        try transaction {
+            let current = try backupPayload()
+            let applied = try LibraryDataSyncEngine.reconcile(base: base, current: current, incoming: incoming)
+            changed = try !LibraryDataSyncEngine.hasSameData(current, applied)
+            if changed {
+                try replaceBookSources(applied.bookSources)
+                try replaceBookmarks(applied.bookmarks)
+                try replaceReadRecords(applied.readRecords)
+                try replaceBookNotes(applied.bookNotes)
+                try replaceTxtTocRules(applied.txtTocRules)
+                try replaceHttpTTS(applied.httpTTS)
+                try replaceRuleSubs(applied.ruleSubs)
+                try replaceRssSources(applied.rssSources)
+            }
+        }
+        return changed
     }
 
     public func loadBookSources() throws -> [BookSource] {
@@ -214,6 +266,152 @@ public actor LegadoDatabase {
             sqlite3_bind_int64(statement, 1, value.time)
             try self.bind(data, to: statement, at: 2)
         }
+    }
+
+    // MARK: - 笔记
+
+    public func loadBookNotes(bookURL: String? = nil) throws -> [BookNote] {
+        if let bookURL {
+            return try load(
+                "SELECT payload FROM book_notes WHERE book_url = ? ORDER BY chapter_index, updated_at",
+                as: BookNote.self,
+                bindings: [bookURL]
+            )
+        }
+        return try load("SELECT payload FROM book_notes ORDER BY updated_at DESC", as: BookNote.self)
+    }
+
+    public func replaceBookNotes(_ values: [BookNote]) throws {
+        try replaceAll(
+            deleteSQL: "DELETE FROM book_notes",
+            insertSQL: "INSERT INTO book_notes(id, book_url, chapter_index, updated_at, payload) VALUES(?, ?, ?, ?, ?)",
+            values: values
+        ) { statement, value, _, data in
+            try self.bind(value.id, to: statement, at: 1)
+            try self.bind(value.bookUrl, to: statement, at: 2)
+            sqlite3_bind_int64(statement, 3, Int64(value.chapterIndex))
+            sqlite3_bind_int64(statement, 4, value.updatedAt)
+            try self.bind(data, to: statement, at: 5)
+        }
+    }
+
+    public func upsertBookNote(_ value: BookNote) throws {
+        let statement = try prepare("""
+            INSERT INTO book_notes(id, book_url, chapter_index, updated_at, payload) VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                book_url = excluded.book_url,
+                chapter_index = excluded.chapter_index,
+                updated_at = excluded.updated_at,
+                payload = excluded.payload
+            """)
+        defer { sqlite3_finalize(statement) }
+        try bind(value.id, to: statement, at: 1)
+        try bind(value.bookUrl, to: statement, at: 2)
+        sqlite3_bind_int64(statement, 3, Int64(value.chapterIndex))
+        sqlite3_bind_int64(statement, 4, value.updatedAt)
+        try bind(try encoder.encode(value), to: statement, at: 5)
+        try stepDone(statement)
+    }
+
+    public func deleteBookNote(id: String) throws {
+        try executeBound("DELETE FROM book_notes WHERE id = ?", text: id)
+    }
+
+    public func deleteBookNotes(bookURL: String) throws {
+        try executeBound("DELETE FROM book_notes WHERE book_url = ?", text: bookURL)
+    }
+
+    // MARK: - 正文索引（用于全书 / 全库搜索）
+
+    public func indexChapterText(
+        bookURL: String,
+        bookName: String,
+        chapterIndex: Int,
+        chapterName: String,
+        content: String,
+        updatedAt: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)
+    ) throws {
+        let statement = try prepare("""
+            INSERT INTO chapter_text(book_url, chapter_index, chapter_name, book_name, content, updated_at)
+            VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(book_url, chapter_index) DO UPDATE SET
+                chapter_name = excluded.chapter_name,
+                book_name = excluded.book_name,
+                content = excluded.content,
+                updated_at = excluded.updated_at
+            """)
+        defer { sqlite3_finalize(statement) }
+        try bind(bookURL, to: statement, at: 1)
+        sqlite3_bind_int64(statement, 2, Int64(chapterIndex))
+        try bind(chapterName, to: statement, at: 3)
+        try bind(bookName, to: statement, at: 4)
+        try bind(content, to: statement, at: 5)
+        sqlite3_bind_int64(statement, 6, updatedAt)
+        try stepDone(statement)
+    }
+
+    public func removeChapterText(bookURL: String) throws {
+        try executeBound("DELETE FROM chapter_text WHERE book_url = ?", text: bookURL)
+    }
+
+    public func chapterTextCount(bookURL: String? = nil) throws -> Int {
+        if let bookURL {
+            let statement = try prepare("SELECT COUNT(*) FROM chapter_text WHERE book_url = ?")
+            defer { sqlite3_finalize(statement) }
+            try bind(bookURL, to: statement, at: 1)
+            guard sqlite3_step(statement) == SQLITE_ROW else { throw databaseError(.execute) }
+            return Int(sqlite3_column_int64(statement, 0))
+        }
+        let statement = try prepare("SELECT COUNT(*) FROM chapter_text")
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw databaseError(.execute) }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    public func searchChapterText(query: String, bookURL: String?, limit: Int) throws -> [ChapterSearchHit] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        guard limit > 0 else { return [] }
+        let pattern = "%\(trimmed.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "%", with: "\\%").replacingOccurrences(of: "_", with: "\\_"))%"
+        let usesFTS = trimmed.unicodeScalars.count >= 3
+        let sql = """
+            SELECT book_url, book_name, chapter_index, chapter_name, content
+            FROM chapter_text
+            WHERE \(usesFTS ? "rowid IN (SELECT rowid FROM chapter_fts WHERE chapter_fts MATCH ?) AND " : "")content LIKE ? ESCAPE '\\'\(bookURL == nil ? "" : " AND book_url = ?")
+            ORDER BY book_url, chapter_index
+            LIMIT ?
+            """
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        var index: Int32 = 1
+        if usesFTS {
+            try bind("\"" + trimmed.replacingOccurrences(of: "\"", with: "\"\"") + "\"", to: statement, at: index)
+            index += 1
+        }
+        try bind(pattern, to: statement, at: index)
+        index += 1
+        if let bookURL {
+            try bind(bookURL, to: statement, at: index)
+            index += 1
+        }
+        sqlite3_bind_int64(statement, index, Int64(min(limit, 500)))
+
+        var results: [ChapterSearchHit] = []
+        while true {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { break }
+            guard status == SQLITE_ROW else { throw databaseError(.execute) }
+            let content = columnString(statement, at: 4)
+            results.append(ChapterSearchHit(
+                bookURL: columnString(statement, at: 0),
+                bookName: columnString(statement, at: 1),
+                chapterIndex: Int(sqlite3_column_int64(statement, 2)),
+                chapterName: columnString(statement, at: 3),
+                snippet: ChapterSearchHit.snippet(in: content, matching: trimmed),
+                position: (content as NSString).range(of: trimmed, options: .caseInsensitive).location
+            ))
+        }
+        return results
     }
 
     public func loadReadRecords() throws -> [ReadRecord] {
@@ -460,6 +658,9 @@ public actor LegadoDatabase {
             sqlite3_bind_int(statement, 3, value.enable ? 1 : 0)
             try self.bind(data, to: statement, at: 4)
         }
+        if sqlite3_get_autocommit(handle) != 0 {
+            NotificationCenter.default.post(name: Notification.Name("legado.libraryDataDidChange"), object: nil)
+        }
     }
 
     public func loadHttpTTS() throws -> [HttpTTS] { try load("SELECT payload FROM httpTTS ORDER BY name", as: HttpTTS.self) }
@@ -472,6 +673,9 @@ public actor LegadoDatabase {
             sqlite3_bind_int64(statement, 1, value.id)
             try self.bind(value.name, to: statement, at: 2)
             try self.bind(data, to: statement, at: 3)
+        }
+        if sqlite3_get_autocommit(handle) != 0 {
+            NotificationCenter.default.post(name: Notification.Name("legado.libraryDataDidChange"), object: nil)
         }
     }
 
@@ -1062,6 +1266,61 @@ public actor LegadoDatabase {
                 throw error
             }
         }
+        if version < 8 {
+            try execute(database, "BEGIN IMMEDIATE")
+            do {
+                try execute(database, """
+                    CREATE TABLE book_notes(
+                        id TEXT PRIMARY KEY NOT NULL,
+                        book_url TEXT NOT NULL,
+                        chapter_index INTEGER NOT NULL DEFAULT 0,
+                        updated_at INTEGER NOT NULL DEFAULT 0,
+                        payload BLOB NOT NULL
+                    );
+                    CREATE INDEX book_notes_book ON book_notes(book_url, chapter_index);
+                    CREATE INDEX book_notes_updated ON book_notes(updated_at DESC);
+                    CREATE TABLE chapter_text(
+                        book_url TEXT NOT NULL,
+                        chapter_index INTEGER NOT NULL,
+                        chapter_name TEXT NOT NULL DEFAULT '',
+                        book_name TEXT NOT NULL DEFAULT '',
+                        content TEXT NOT NULL,
+                        updated_at INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(book_url, chapter_index)
+                    );
+                    CREATE INDEX chapter_text_book ON chapter_text(book_url, chapter_index);
+                    PRAGMA user_version = 8;
+                    """)
+                try execute(database, "COMMIT")
+            } catch {
+                try? execute(database, "ROLLBACK")
+                throw error
+            }
+        }
+        if version < 9 {
+            try execute(database, "BEGIN IMMEDIATE")
+            do {
+                try execute(database, """
+                    CREATE VIRTUAL TABLE chapter_fts USING fts5(content, content='chapter_text', content_rowid='rowid', tokenize='trigram');
+                    CREATE TRIGGER chapter_text_insert AFTER INSERT ON chapter_text BEGIN
+                        INSERT INTO chapter_fts(rowid, content) VALUES(new.rowid, new.content);
+                    END;
+                    CREATE TRIGGER chapter_text_delete AFTER DELETE ON chapter_text BEGIN
+                        INSERT INTO chapter_fts(chapter_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+                    END;
+                    CREATE TRIGGER chapter_text_update AFTER UPDATE ON chapter_text BEGIN
+                        INSERT INTO chapter_fts(chapter_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+                        INSERT INTO chapter_fts(rowid, content) VALUES(new.rowid, new.content);
+                    END;
+                    INSERT INTO chapter_fts(chapter_fts) VALUES('rebuild');
+                    PRAGMA user_version = 9;
+                    """)
+                try execute(database, "COMMIT")
+            } catch {
+                try? execute(database, "ROLLBACK")
+                throw error
+            }
+        }
     }
 
     private func legacyChaptersImported() -> Bool {
@@ -1123,12 +1382,19 @@ public actor LegadoDatabase {
     }
 
     private func transaction(_ operation: () throws -> Void) throws {
-        try Self.execute(handle, "BEGIN IMMEDIATE")
+        let nested = sqlite3_get_autocommit(handle) == 0
+        let savepoint = "transaction_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        try Self.execute(handle, nested ? "SAVEPOINT \(savepoint)" : "BEGIN IMMEDIATE")
         do {
             try operation()
-            try Self.execute(handle, "COMMIT")
+            try Self.execute(handle, nested ? "RELEASE \(savepoint)" : "COMMIT")
         } catch {
-            try? Self.execute(handle, "ROLLBACK")
+            if nested {
+                try? Self.execute(handle, "ROLLBACK TO \(savepoint)")
+                try? Self.execute(handle, "RELEASE \(savepoint)")
+            } else {
+                try? Self.execute(handle, "ROLLBACK")
+            }
             throw error
         }
     }
@@ -1138,7 +1404,8 @@ public actor LegadoDatabase {
             "book_sources", "books", "chapters", "book_groups", "bookmarks", "read_records",
             "search_keywords", "caches", "cookies", "searchBooks"
             , "txtTocRules", "httpTTS", "ruleSubs", "keyboardAssists", "servers",
-            "rssSources", "rssArticles", "rssReadRecords", "rssStars"
+            "rssSources", "rssArticles", "rssReadRecords", "rssStars",
+            "book_notes", "chapter_text"
         ]
         guard allowed.contains(table) else { throw LegadoDatabaseError.execute("非法表名") }
         let statement = try prepare("SELECT COUNT(*) FROM \(table)")

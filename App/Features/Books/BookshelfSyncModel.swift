@@ -116,6 +116,7 @@ final class BookshelfSyncModel: ObservableObject {
                 changesDuringSync = true
             }
             try await engine.acknowledge(result)
+            try await synchronizeLibraryData(server: server, identity: identity, directory: baseDirectory)
             lastSync = Date()
             defaults.set(lastSync, forKey: lastSyncKey)
             status = "同步完成，书架共 \(library.books.count) 本。"
@@ -125,5 +126,32 @@ final class BookshelfSyncModel: ObservableObject {
             status = "同步失败：\(error.localizedDescription)"
             changesDuringSync = false
         }
+    }
+
+    private func synchronizeLibraryData(server: Server, identity: String, directory: URL) async throws {
+        let database = try LegadoDatabase(url: LegadoDatabase.defaultURL())
+        let rulesURL = LegadoDatabase.defaultURL().deletingLastPathComponent().appendingPathComponent("replace-rules.json")
+        let rules = FileReplaceRuleRepository(fileURL: rulesURL)
+        var input = try await database.backupPayload()
+        input.replaceRules = try await rules.load()
+        let engine = LibraryDataSyncEngine(storage: try RemoteStorageClient(server: server),
+                                           stateURL: directory.appendingPathComponent(identity + "-library.json"))
+        let result = try await engine.synchronize(input)
+        var current = try await database.backupPayload()
+        current.replaceRules = try await rules.load()
+        let applied = try LibraryDataSyncEngine.reconcile(base: input, current: current, incoming: result.payload)
+        let changed = try !LibraryDataSyncEngine.hasSameData(current, applied)
+        do {
+            try await rules.save(applied.replaceRules)
+            _ = try await database.applyLibrarySync(base: input, incoming: result.payload)
+        } catch {
+            try await rules.save(current.replaceRules)
+            throw error
+        }
+        try await engine.acknowledge(result)
+        if try !LibraryDataSyncEngine.hasSameData(applied, result.payload) { changesDuringSync = true }
+#if !SWIFT_PACKAGE
+        if changed { NotificationCenter.default.post(name: .legadoDataDidImport, object: nil) }
+#endif
     }
 }

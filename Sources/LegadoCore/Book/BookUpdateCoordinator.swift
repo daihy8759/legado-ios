@@ -1,5 +1,25 @@
 import Foundation
 
+public struct ChapterNotificationSchedule: Sendable {
+    public var quietHoursEnabled: Bool
+    public var startHour: Int
+    public var endHour: Int
+
+    public init(quietHoursEnabled: Bool, startHour: Int = 22, endHour: Int = 8) {
+        self.quietHoursEnabled = quietHoursEnabled
+        self.startHour = min(max(startHour, 0), 23)
+        self.endHour = min(max(endHour, 0), 23)
+    }
+
+    public func deliveryDate(after now: Date, calendar: Calendar = .current) -> Date? {
+        guard quietHoursEnabled, startHour != endHour else { return nil }
+        let hour = calendar.component(.hour, from: now)
+        let isQuiet = startHour < endHour ? (startHour..<endHour).contains(hour) : hour >= startHour || hour < endHour
+        guard isQuiet else { return nil }
+        return calendar.nextDate(after: now, matching: DateComponents(hour: endHour, minute: 0), matchingPolicy: .nextTime)
+    }
+}
+
 public protocol ChapterListLoading: Sendable {
     func loadChapters(book: Book, source: BookSource, maxPages: Int) async -> ChapterListReport
 }
@@ -53,7 +73,7 @@ public struct BookUpdateMerger: Sendable {
         let previousTotal = max(book.totalChapterNum, oldChapters.count)
         let added = max(normalized.count - previousTotal, 0)
         if added > 0 {
-            updated.lastCheckCount = added
+            updated.lastCheckCount = max(book.lastCheckCount, 0) + added
             updated.latestChapterTime = now
         }
         updated.lastCheckTime = now
