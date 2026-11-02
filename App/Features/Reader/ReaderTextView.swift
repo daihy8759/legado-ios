@@ -341,6 +341,8 @@ struct ReaderTextView: UIViewRepresentable {
         var isApplyingContent = false
         private var isTurningPage = false
         private var isRenderingAutoPage = false
+        private var isCapturingPageTurn = false
+        private var pageCurlAnimator: ReaderPageCurlAnimator?
         private var lastReportedPage: Int?
         private var autoPageProgress: CGFloat = 0
         private var eInkElapsed: CFTimeInterval = 0
@@ -457,6 +459,9 @@ struct ReaderTextView: UIViewRepresentable {
 
         func invalidate() {
             layoutGeneration &+= 1
+            pageCurlAnimator?.cancel()
+            pageCurlAnimator = nil
+            isTurningPage = false
             resetAutoPage()
             displayLink?.invalidate()
             displayLink = nil
@@ -607,7 +612,7 @@ struct ReaderTextView: UIViewRepresentable {
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            guard !isRenderingAutoPage, !isApplyingContent else { return }
+            guard !isRenderingAutoPage, !isApplyingContent, !isCapturingPageTurn else { return }
             guard let view = scrollView as? UITextView, !view.text.isEmpty else { return }
             if parent.isLoadingNextChapter, !didRequestLoadingCancellation {
                 let textBottom = max(
@@ -887,7 +892,6 @@ struct ReaderTextView: UIViewRepresentable {
                 : (view.contentOffset.y > offsets[index] + 0.5 ? index : max(index - 1, 0))
             let target = offsets[targetIndex]
             isTurningPage = true
-            let completion: (Bool) -> Void = { [weak self] _ in self?.isTurningPage = false }
             switch parent.isEInkMode ? 4 : parent.pageAnimation {
             case 4:
                 view.setContentOffset(CGPoint(x: 0, y: target), animated: false)
@@ -909,17 +913,81 @@ struct ReaderTextView: UIViewRepresentable {
                 view.setContentOffset(CGPoint(x: 0, y: target), animated: false)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.31) { [weak self] in self?.isTurningPage = false }
             case 2:
-                UIView.transition(
-                    with: view,
-                    duration: 0.38,
-                    options: direction > 0 ? .transitionCurlUp : .transitionCurlDown,
-                    animations: { view.setContentOffset(CGPoint(x: 0, y: target), animated: false) },
-                    completion: completion
-                )
+                startPageCurlTurn(direction: direction, target: target, view: view)
             default:
                 view.setContentOffset(CGPoint(x: 0, y: target), animated: true)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) { [weak self] in self?.isTurningPage = false }
             }
+        }
+
+        /// 仿真翻页：先把当前页与目标页各渲染成一张位图，再交给
+        /// ReaderPageCurlAnimator 做「折页 + 阴影」动画。
+        ///
+        /// 旧实现用 `UIView.transition(with: textView, .transitionCurlUp)`
+        /// 直接对 UITextView 做系统卷页。UITextView 是 UIScrollView，且此视图
+        /// 带有一层 `pageMask`（裁掉跨页的半行），系统卷页在动画期间会对这个
+        /// 滚动视图反复取快照，遮罩与正在滚动的内容叠加，就出现上一页/下一行
+        /// 文字残留的「残影」。改为对纯位图做动画后，live 文本视图不再参与
+        /// 转场，残影消失。
+        private func startPageCurlTurn(direction: Int, target: CGFloat, view: UITextView) {
+            let currentOffset = view.contentOffset.y
+            guard abs(target - currentOffset) > 0.5 else {
+                view.setContentOffset(CGPoint(x: 0, y: target), animated: false)
+                isTurningPage = false
+                return
+            }
+
+            let sourceImage = renderPageImage(in: view)
+            let destinationImage = renderPageImage(in: view, at: target)
+
+            let background = parent.backgroundColor
+            let paperColor: UIColor = background.cgColor.alpha > 0.01
+                ? background
+                : UIColor.secondarySystemBackground
+
+            guard let animator = ReaderPageCurlAnimator(
+                host: view,
+                source: sourceImage,
+                destination: destinationImage,
+                forward: direction > 0,
+                targetOffset: target,
+                paperColor: paperColor,
+                foldAccentColor: parent.foregroundColor,
+                duration: 0.4
+            ) else {
+                view.setContentOffset(CGPoint(x: 0, y: target), animated: false)
+                isTurningPage = false
+                return
+            }
+
+            pageCurlAnimator = animator
+            animator.start { [weak self] _ in
+                guard let self else { return }
+                self.pageCurlAnimator = nil
+                self.isTurningPage = false
+            }
+        }
+
+        /// 渲染文本视图当前可见页为位图；传入 offset 时先临时滚动到该位置再
+        /// 渲染，随后恢复到原位置（用于抓取目标页）。整个过程屏蔽
+        /// scrollViewDidScroll 回调，避免误触发换页/进度写入。
+        private func renderPageImage(in view: UITextView, at offset: CGFloat? = nil) -> UIImage {
+            let originalOffset = view.contentOffset.y
+            if let offset {
+                isCapturingPageTurn = true
+                view.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
+                view.layoutIfNeeded()
+            }
+            let renderer = UIGraphicsImageRenderer(bounds: view.bounds)
+            let image = renderer.image { context in
+                view.layer.render(in: context.cgContext)
+            }
+            if offset != nil {
+                view.setContentOffset(CGPoint(x: 0, y: originalOffset), animated: false)
+                view.layoutIfNeeded()
+                isCapturingPageTurn = false
+            }
+            return image
         }
 
         private func resetAutoPage() {
@@ -1044,5 +1112,190 @@ struct ReaderTextView: UIViewRepresentable {
                 view.setContentOffset(CGPoint(x: 0, y: next), animated: false)
             }
         }
+    }
+}
+
+/// 仿真翻页动画器。
+///
+/// 用两张整页位图合成一次「纸张对折」动画：
+/// - 底层 `destView`：目标页，按进度裁切出「已翻开」的一侧；
+/// - `flatView`：当前页，只保留尚未被折走的部分；
+/// - `flapView`：被折起半张纸的背面（纯纸色 + 渐变阴影 + 折痕线）。
+///
+/// 折线从书页一侧扫到另一侧，进度由 `CADisplayLink` 驱动并做缓动。
+/// 全程只改位图与遮罩，live 文本视图保持静止，动画结束后再一次性把
+/// `contentOffset` 落到目标页，因此不会再出现残影。
+@MainActor
+final class ReaderPageCurlAnimator {
+    private let host: UITextView
+    private let forward: Bool
+    private let targetOffset: CGFloat
+    private let duration: CFTimeInterval
+    private let width: CGFloat
+    private let height: CGFloat
+
+    private let container = UIView()
+    private let destView = UIImageView()
+    private let flatView = UIImageView()
+    private let destMask = CAShapeLayer()
+    private let flatMask = CAShapeLayer()
+    private let flapView = UIView()
+    private let flapGradient = CAGradientLayer()
+    private let foldLine = UIView()
+
+    private var link: CADisplayLink?
+    private var startTime: CFTimeInterval = 0
+    private var didFinish = false
+    private var onComplete: ((Bool) -> Void)?
+
+    init?(
+        host: UITextView,
+        source: UIImage,
+        destination: UIImage,
+        forward: Bool,
+        targetOffset: CGFloat,
+        paperColor: UIColor,
+        foldAccentColor: UIColor,
+        duration: CFTimeInterval
+    ) {
+        let size = host.bounds.size
+        guard size.width > 1, size.height > 1 else { return nil }
+        self.host = host
+        self.forward = forward
+        self.targetOffset = targetOffset
+        self.duration = max(duration, 0.01)
+        self.width = size.width
+        self.height = size.height
+
+        container.frame = CGRect(x: 0, y: host.contentOffset.y, width: size.width, height: size.height)
+        container.clipsToBounds = true
+        container.isUserInteractionEnabled = false
+        container.backgroundColor = .clear
+
+        destView.image = destination
+        destView.contentMode = .scaleToFill
+        destView.frame = container.bounds
+        destView.layer.mask = destMask
+        destMask.frame = destView.bounds
+        container.addSubview(destView)
+
+        flatView.image = source
+        flatView.contentMode = .scaleToFill
+        flatView.frame = container.bounds
+        flatView.layer.mask = flatMask
+        flatMask.frame = flatView.bounds
+        container.addSubview(flatView)
+
+        for mask in [destMask, flatMask] {
+            mask.fillColor = UIColor.black.cgColor
+            mask.strokeColor = nil
+            mask.actions = ["path": NSNull(), "position": NSNull(), "bounds": NSNull()]
+        }
+
+        flapView.backgroundColor = paperColor
+        container.addSubview(flapView)
+
+        flapGradient.startPoint = CGPoint(x: 0, y: 0.5)
+        flapGradient.endPoint = CGPoint(x: 1, y: 0.5)
+        if forward {
+            flapGradient.colors = [
+                UIColor.white.withAlphaComponent(0).cgColor,
+                UIColor.black.withAlphaComponent(0.02).cgColor,
+                UIColor.black.withAlphaComponent(0.20).cgColor
+            ]
+            flapGradient.locations = [0, 0.72, 1]
+        } else {
+            flapGradient.colors = [
+                UIColor.black.withAlphaComponent(0.20).cgColor,
+                UIColor.black.withAlphaComponent(0.02).cgColor,
+                UIColor.white.withAlphaComponent(0).cgColor
+            ]
+            flapGradient.locations = [0, 0.28, 1]
+        }
+        flapView.layer.addSublayer(flapGradient)
+
+        foldLine.backgroundColor = foldAccentColor.withAlphaComponent(0.14)
+        foldLine.isUserInteractionEnabled = false
+        container.addSubview(foldLine)
+
+        host.addSubview(container)
+        apply(progress: 0)
+    }
+
+    func start(completion: @escaping (Bool) -> Void) {
+        onComplete = completion
+        let displayLink = CADisplayLink(target: self, selector: #selector(step(_:)))
+        displayLink.add(to: .main, forMode: .common)
+        link = displayLink
+        startTime = 0
+    }
+
+    func cancel() {
+        finish(commit: false)
+    }
+
+    @objc private func step(_ displayLink: CADisplayLink) {
+        if startTime == 0 {
+            startTime = displayLink.timestamp
+            return
+        }
+        let raw = (displayLink.timestamp - startTime) / duration
+        let t = min(max(raw, 0), 1)
+        apply(progress: Self.easeInOut(CGFloat(t)))
+        if t >= 1 { finish(commit: true) }
+    }
+
+    private static func easeInOut(_ t: CGFloat) -> CGFloat {
+        if t < 0.5 { return 2 * t * t }
+        let v = -2 * t + 2
+        return 1 - v * v / 2
+    }
+
+    private func apply(progress: CGFloat) {
+        let p = min(max(progress, 0), 1)
+        let fold = forward ? width * (1 - p) : width * p
+        let f = min(max(fold, 0), width)
+
+        let revealed: CGRect
+        let remaining: CGRect
+        let flap: CGRect
+        if forward {
+            revealed = CGRect(x: f, y: 0, width: max(width - f, 0), height: height)
+            remaining = CGRect(x: 0, y: 0, width: f, height: height)
+            let flapMin = max(0, 2 * f - width)
+            flap = CGRect(x: flapMin, y: 0, width: max(f - flapMin, 0), height: height)
+        } else {
+            revealed = CGRect(x: 0, y: 0, width: f, height: height)
+            remaining = CGRect(x: f, y: 0, width: max(width - f, 0), height: height)
+            let flapMax = min(width, 2 * f)
+            flap = CGRect(x: f, y: 0, width: max(flapMax - f, 0), height: height)
+        }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        destMask.path = UIBezierPath(rect: revealed).cgPath
+        flatMask.path = UIBezierPath(rect: remaining).cgPath
+        flapView.frame = flap
+        flapGradient.frame = flapView.bounds
+        foldLine.frame = CGRect(x: f - 0.5, y: 0, width: 1, height: height)
+        foldLine.isHidden = f <= 1 || f >= width - 1
+        CATransaction.commit()
+    }
+
+    private func finish(commit: Bool) {
+        guard !didFinish else { return }
+        didFinish = true
+        link?.invalidate()
+        link = nil
+        if commit {
+            apply(progress: 1)
+            if abs(host.contentOffset.y - targetOffset) > 0.5 {
+                host.setContentOffset(CGPoint(x: 0, y: targetOffset), animated: false)
+            }
+        }
+        container.removeFromSuperview()
+        let completion = onComplete
+        onComplete = nil
+        completion?(commit)
     }
 }
