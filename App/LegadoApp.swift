@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct LegadoApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @UIApplicationDelegateAdaptor(LegadoAppDelegate.self) private var appDelegate
     @StateObject private var sourceLibrary: SourceLibraryModel
     @StateObject private var bookLibrary: BookLibraryModel
@@ -9,11 +10,13 @@ struct LegadoApp: App {
     @StateObject private var readingActivity: ReadingActivityModel
     @StateObject private var rssLibrary: RSSLibraryModel
     @StateObject private var ruleSubscriptions: RuleSubscriptionModel
+    @StateObject private var bookshelfSync: BookshelfSyncModel
 
     init() {
         AppDiagnostics.shared.start()
         SourceWebViewExecutorRegistry.shared.register(WKSourceWebViewExecutor())
         let demo = ProcessInfo.processInfo.arguments.contains("-uiDemo")
+        _bookshelfSync = StateObject(wrappedValue: BookshelfSyncModel(allowsAutomatic: !demo))
         _sourceLibrary = StateObject(wrappedValue: demo
             ? SourceLibraryModel.demo(sources: DemoContent.sources)
             : SourceLibraryModel.live())
@@ -39,6 +42,16 @@ struct LegadoApp: App {
                 .environmentObject(readingActivity)
                 .environmentObject(rssLibrary)
                 .environmentObject(ruleSubscriptions)
+                .environmentObject(bookshelfSync)
+                .onReceive(bookLibrary.$books.dropFirst()) { _ in bookshelfSync.schedule(bookLibrary) }
+                .onReceive(bookLibrary.$groups.dropFirst()) { _ in bookshelfSync.schedule(bookLibrary) }
+                .onChange(of: scenePhase) { phase in
+                    if phase == .active {
+                        Task { await bookshelfSync.synchronizeIfAutomatic(bookLibrary) }
+                    } else if phase == .background {
+                        Task { await bookshelfSync.enteringBackground(bookLibrary) }
+                    }
+                }
                 .task {
                     await sourceLibrary.load()
                     if let index = ProcessInfo.processInfo.arguments.firstIndex(of: "-uiAutomationImportURL"),
@@ -54,6 +67,7 @@ struct LegadoApp: App {
                     await readingActivity.load()
                     await rssLibrary.load()
                     await ruleSubscriptions.load()
+                    await bookshelfSync.start(bookLibrary)
                     if UserDefaults.standard.bool(forKey: "auto_refresh") {
                         await bookLibrary.checkForUpdates(sources: sourceLibrary.sources, onlyRead: UserDefaults.standard.bool(forKey: "onlyUpdateRead"))
                     }

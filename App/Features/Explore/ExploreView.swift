@@ -200,7 +200,7 @@ struct ExploreView: View {
                 .padding(.bottom, 32)
             }
         }
-        .background(ReadingTheme.canvas)
+        .readingPageBackground()
         .navigationBarHidden(true)
     }
 }

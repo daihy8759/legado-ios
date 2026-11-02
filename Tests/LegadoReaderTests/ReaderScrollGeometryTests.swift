@@ -158,6 +158,74 @@ final class ReaderBookmarkPersistenceTests: XCTestCase {
 
 @MainActor
 final class ReaderScrollGeometryTests: XCTestCase {
+    func testPagedChapterStartsAtHeadingAndRestoresLaterPositions() async throws {
+        let title = "第一章 · 开始"
+        let body = String(repeating: "这里是一段足够长的阅读正文。\n", count: 100)
+        let parent = configuration(pageAnimation: 0, text: body)
+        let coordinator = parent.makeCoordinator()
+        let view = UITextView(frame: CGRect(x: 0, y: 0, width: 320, height: 200))
+        view.contentInsetAdjustmentBehavior = .never
+        view.textContainerInset = UIEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
+        view.attributedText = NSAttributedString(
+            string: title + "\n" + body,
+            attributes: [.font: UIFont.systemFont(ofSize: 20)]
+        )
+        coordinator.currentSectionStart = 0
+        coordinator.renderedPrefixLength = (title + "\n").utf16.count
+        view.layoutIfNeeded()
+
+        coordinator.scroll(to: 0, in: view)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(view.contentOffset.y, -view.adjustedContentInset.top, accuracy: 0.5)
+
+        coordinator.scroll(to: 500, in: view)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertGreaterThan(view.contentOffset.y, 0)
+    }
+
+    func testPageBoundariesFollowCompleteTextLines() {
+        let view = UITextView(frame: CGRect(x: 0, y: 0, width: 320, height: 203))
+        view.contentInsetAdjustmentBehavior = .never
+        view.textContainerInset = UIEdgeInsets(top: 11, left: 20, bottom: 13, right: 20)
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 7
+        style.paragraphSpacing = 11
+        view.attributedText = NSAttributedString(
+            string: String(repeating: "这一段包含不同长度的文字，用来检查分页时每一行是否完整显示。\n", count: 80),
+            attributes: [.font: UIFont.systemFont(ofSize: 20), .paragraphStyle: style]
+        )
+        view.layoutIfNeeded()
+        view.layoutManager.ensureLayout(for: view.textContainer)
+        let offsets = ReaderPageLayout.offsets(in: view)
+        XCTAssertGreaterThan(offsets.count, 2)
+        XCTAssertEqual(offsets[0], 0, accuracy: 0.5)
+        XCTAssertLessThanOrEqual(view.contentSize.height - view.bounds.height - (offsets.last ?? 0), 40)
+        for offset in offsets.dropFirst().dropLast() {
+            let glyph = view.layoutManager.glyphIndex(for: CGPoint(x: 0, y: offset), in: view.textContainer)
+            let line = view.layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            XCTAssertEqual(offset, line.minY, accuracy: 0.5)
+        }
+    }
+
+    func testPagedBottomInsetKeepsAtLeastOneLineBeforeFooter() {
+        for fontSize: CGFloat in [14, 20, 26, 38] {
+            for lineSpacing: CGFloat in [0, 8, 24] {
+                for configured: CGFloat in [0, 6, 80] {
+                    let bottom = ReaderPageLayout.pagedBottomInset(
+                        configured: configured,
+                        fontSize: fontSize,
+                        lineSpacing: lineSpacing
+                    )
+                    XCTAssertGreaterThanOrEqual(bottom, configured)
+                    XCTAssertGreaterThanOrEqual(
+                        bottom,
+                        UIFont.systemFont(ofSize: fontSize).lineHeight + lineSpacing
+                    )
+                }
+            }
+        }
+    }
+
     func testPrependingAndRecyclingStayWithinOnePhysicalPixel() async throws {
         let chapters = (4...6).map { chapter($0) }
         let fixture = host(chapters: chapters, active: 5)
@@ -320,18 +388,19 @@ final class ReaderScrollGeometryTests: XCTestCase {
               onRetainChapters: { _ in })
     }
 
-    private func configuration(fontSize: Double = 20) -> ReaderTextView {
-        .init(text: "", title: "", previousTitle: nil, previousText: "", isPreviousReady: false,
+    private func configuration(fontSize: Double = 20, pageAnimation: Int = 3, text: String = "") -> ReaderTextView {
+        .init(text: text, title: "", previousTitle: nil, previousText: "", isPreviousReady: false,
               continuationTitle: nil, continuationText: "", isContinuationReady: false, isVolume: false,
               fontSize: fontSize, fontPath: "", letterSpacing: 0, lineSpacing: 8, paragraphSpacing: 12,
               paragraphIndent: "　　", paddingLeft: 20, paddingRight: 20, paddingTop: 16, paddingBottom: 16,
               headerInset: 0, footerInset: 0, fontWeight: 0, titleMode: 0, titleSize: 4,
               titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0, isSelectable: false,
-              fullJustify: true, pageAnimation: 3, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),
+              fullJustify: true, pageAnimation: pageAnimation, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),
               backgroundColor: .white, foregroundColor: .black, requestedPosition: 0, jumpPosition: nil,
               renderRevision: 0, readerPosition: .constant(0), pageRanges: .constant([]),
               currentPage: .constant(1), totalPages: .constant(1), isAutoReading: false,
-              isAutoReadPaused: false, isLoadingNextChapter: false, secondsPerScreen: 10,
+              isAutoReadPaused: false, isAutoFlipping: false, autoFlipInterval: 12,
+              isLoadingNextChapter: false, secondsPerScreen: 10,
               onReachedEnd: { _ in }, onReachedStart: { _ in }, onEnteredPrevious: { _ in },
               onEnteredContinuation: { _ in }, onDeferredRender: {}, onCancelNextLoading: {},
               onPageChanged: {}, onTapAction: { _ in })

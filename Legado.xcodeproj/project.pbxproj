@@ -107,6 +107,7 @@
 		910000000000000000000002 /* HostsHTTPTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000002 /* HostsHTTPTransport.swift */; };
 		910000000000000000000003 /* DiagnosticLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000003 /* DiagnosticLog.swift */; };
 		910000000000000000000004 /* OtherSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000004 /* OtherSettingsView.swift */; };
+		1A1100000000000000000001 /* AppThemeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2200000000000000000001 /* AppThemeView.swift */; };
 		910000000000000000000005 /* DiagnosticLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000005 /* DiagnosticLogView.swift */; };
 		910000000000000000000006 /* AboutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000006 /* AboutView.swift */; };
 		910000000000000000000007 /* AppDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000007 /* AppDiagnostics.swift */; };
@@ -134,6 +135,11 @@
         ED1000000000000000000001 /* EPUBReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED2000000000000000000001; };
         ED1000000000000000000002 /* Readium-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = ED2000000000000000000002; };
         ED1000000000000000000003 /* EPUBReaderIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED2000000000000000000003; };
+		AC1000000000000000000001 /* RemoteStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC2000000000000000000001; };
+		AC1000000000000000000002 /* RemoteServerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC2000000000000000000002; };
+		AC1000000000000000000003 /* RemoteStorageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC2000000000000000000003; };
+		AC1000000000000000000004 /* BookshelfSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC2000000000000000000004; };
+		AC1000000000000000000005 /* BookshelfSyncModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC2000000000000000000005; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -239,6 +245,7 @@
 		E20000000000000000000002 /* HostsHTTPTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostsHTTPTransport.swift; sourceTree = "<group>"; };
 		E20000000000000000000003 /* DiagnosticLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticLog.swift; sourceTree = "<group>"; };
 		E20000000000000000000004 /* OtherSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OtherSettingsView.swift; sourceTree = "<group>"; };
+		1A2200000000000000000001 /* AppThemeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppThemeView.swift; sourceTree = "<group>"; };
 		E20000000000000000000005 /* DiagnosticLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticLogView.swift; sourceTree = "<group>"; };
 		E20000000000000000000006 /* AboutView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutView.swift; sourceTree = "<group>"; };
 		E20000000000000000000007 /* AppDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDiagnostics.swift; sourceTree = "<group>"; };
@@ -263,6 +270,11 @@
         ED2000000000000000000001 /* EPUBReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EPUBReaderView.swift; sourceTree = "<group>"; };
         ED2000000000000000000002 /* Readium-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Readium-LICENSE.txt"; sourceTree = "<group>"; };
         ED2000000000000000000003 /* EPUBReaderIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/LegadoReaderTests/EPUBReaderIntegrationTests.swift; sourceTree = SOURCE_ROOT; };
+		AC2000000000000000000001 /* RemoteStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LegadoCore/Remote/RemoteStorage.swift; sourceTree = SOURCE_ROOT; };
+		AC2000000000000000000002 /* RemoteServerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LegadoCore/Remote/RemoteServerStore.swift; sourceTree = SOURCE_ROOT; };
+		AC2000000000000000000003 /* RemoteStorageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/Features/Settings/RemoteStorageView.swift; sourceTree = SOURCE_ROOT; };
+		AC2000000000000000000004 /* BookshelfSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LegadoCore/Remote/BookshelfSync.swift; sourceTree = SOURCE_ROOT; };
+		AC2000000000000000000005 /* BookshelfSyncModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/Features/Books/BookshelfSyncModel.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -355,6 +367,7 @@
 		A30000000000000000000004 /* Books Feature */ = {
 			isa = PBXGroup;
 			children = (
+				AC2000000000000000000005 /* BookshelfSyncModel.swift */,
 				A20000000000000000000007 /* BookLibraryModel.swift */,
 				B20000000000000000000028 /* BookDetailViewModel.swift */,
 				B20000000000000000000027 /* BookshelfReadViewModel.swift */,
@@ -436,6 +449,7 @@
 				C3000000000000000000000B /* LocalBook */,
 				C3000000000000000000000C /* RSS */,
 				C3000000000000000000000D /* TTS */,
+				AC3000000000000000000001 /* Remote */,
 			);
 			path = Sources/LegadoCore;
 			sourceTree = "<group>";
@@ -601,7 +615,9 @@
 		E30000000000000000000001 /* Settings Feature */ = {
 			isa = PBXGroup;
 			children = (
+				AC2000000000000000000003 /* RemoteStorageView.swift */,
 				E20000000000000000000004 /* OtherSettingsView.swift */,
+				1A2200000000000000000001 /* AppThemeView.swift */,
 				E20000000000000000000005 /* DiagnosticLogView.swift */,
 				E20000000000000000000006 /* AboutView.swift */,
 				E20000000000000000000007 /* AppDiagnostics.swift */,
@@ -619,6 +635,16 @@
                 ED2000000000000000000002 /* Readium-LICENSE.txt */,
 			);
 			path = Resources;
+			sourceTree = "<group>";
+		};
+		AC3000000000000000000001 /* Remote */ = {
+			isa = PBXGroup;
+			children = (
+				AC2000000000000000000004 /* BookshelfSync.swift */,
+				AC2000000000000000000001 /* RemoteStorage.swift */,
+				AC2000000000000000000002 /* RemoteServerStore.swift */,
+			);
+			path = Remote;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -735,7 +761,13 @@
 				910000000000000000000007 /* AppDiagnostics.swift in Sources */,
 				910000000000000000000006 /* AboutView.swift in Sources */,
 				910000000000000000000005 /* DiagnosticLogView.swift in Sources */,
+				AC1000000000000000000004 /* BookshelfSync.swift in Sources */,
+				AC1000000000000000000005 /* BookshelfSyncModel.swift in Sources */,
+				AC1000000000000000000001 /* RemoteStorage.swift in Sources */,
+				AC1000000000000000000002 /* RemoteServerStore.swift in Sources */,
+				AC1000000000000000000003 /* RemoteStorageView.swift in Sources */,
 				910000000000000000000004 /* OtherSettingsView.swift in Sources */,
+				1A1100000000000000000001 /* AppThemeView.swift in Sources */,
 				910000000000000000000003 /* DiagnosticLog.swift in Sources */,
 				910000000000000000000002 /* HostsHTTPTransport.swift in Sources */,
 				910000000000000000000001 /* ApplicationSettings.swift in Sources */,

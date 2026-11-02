@@ -3,6 +3,28 @@ import UIKit
 
 @MainActor
 final class ReaderScrollGestureTests: XCTestCase {
+    func testInkReaderRespectsSafeAreaAndPaintsTheBottomEdge() throws {
+        for mode in ["0", "3"] {
+            let app = XCUIApplication()
+            app.launchArguments = [
+                "-uiDemo", "-uiDemoReader", "-pageAnim", mode,
+                "-themeMode", "4", "-readerTheme", "ink", "-textSize", "26",
+                "-readerUseBackgroundImage", "NO", "-readerHideStatusBar", "NO"
+            ]
+            app.launch()
+            let reader = mode == "3" ? app.collectionViews["reader.continuous"] : app.textViews["reader.text"]
+            XCTAssertTrue(reader.waitForExistence(timeout: 20))
+            let statusBar = app.statusBars.firstMatch
+            if statusBar.exists {
+                XCTAssertGreaterThanOrEqual(reader.frame.minY, statusBar.frame.maxY - 1)
+            }
+            XCTAssertGreaterThan(reader.frame.maxY, app.frame.maxY - 130)
+            let bottom = try backgroundRGB(in: app, verticalFraction: 0.985)
+            XCTAssertLessThan(bottom[2], 245, "The bottom edge should use the ink paper color, not white")
+            app.terminate()
+        }
+    }
+
     func testBackgroundSwitchRestoresPresetWithoutDeletingPhoto() throws {
         try exerciseBackgroundSwitch(readingMode: "0")
     }
@@ -59,10 +81,10 @@ final class ReaderScrollGestureTests: XCTestCase {
         XCTAssertEqual(try backgroundRGB(in: app), [221, 192, 144])
     }
 
-    private func backgroundRGB(in app: XCUIApplication) throws -> [Int] {
+    private func backgroundRGB(in app: XCUIApplication, verticalFraction: CGFloat = 0.28) throws -> [Int] {
         let image = try XCTUnwrap(app.screenshot().image.cgImage)
         let pixel = try XCTUnwrap(image.cropping(to: CGRect(
-            x: image.width / 50, y: image.height * 28 / 100, width: 1, height: 1
+            x: image.width / 50, y: Int(CGFloat(image.height) * verticalFraction), width: 1, height: 1
         )))
         var bytes = [UInt8](repeating: 0, count: 4)
         try bytes.withUnsafeMutableBytes { buffer in
@@ -245,6 +267,46 @@ final class ReaderScrollGestureTests: XCTestCase {
         let previous = expectation(for: NSPredicate { _, _ in page.label.hasPrefix("1/") }, evaluatedWith: nil)
         wait(for: [previous], timeout: 5)
         XCTAssertEqual(body.value as? String, chapter)
+        attachScreenshot(app)
+    }
+
+    func testAutoFlipTurnsPagesAutomaticallyInPagedMode() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiScrollRegression", "-pageAnim", "4", "-themeMode", "1", "-autoFlipSpeed", "1", "-textSize", "28"]
+        app.launch()
+        let body = app.textViews["reader.text"]
+        XCTAssertTrue(body.waitForExistence(timeout: 20))
+        let page = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+/[0-9]+.*")).firstMatch
+        let ready = expectation(for: NSPredicate { _, _ in
+            page.exists && page.label.hasPrefix("1/")
+        }, evaluatedWith: nil)
+        wait(for: [ready], timeout: 15)
+
+        func showMenu() {
+            if !app.buttons["更多"].exists {
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            }
+            XCTAssertTrue(app.buttons["更多"].waitForExistence(timeout: 5))
+        }
+        showMenu()
+        app.buttons["更多"].tap()
+        XCTAssertTrue(app.buttons["自动阅读"].waitForExistence(timeout: 5))
+        app.buttons["自动阅读"].tap()
+        let startFlip = app.buttons["开始自动翻页"]
+        XCTAssertTrue(startFlip.waitForExistence(timeout: 5))
+        startFlip.tap()
+
+        let flipped = expectation(for: NSPredicate { _, _ in
+            page.exists && page.label.hasPrefix("2/")
+        }, evaluatedWith: nil)
+        wait(for: [flipped], timeout: 10)
+
+        showMenu()
+        app.buttons["更多"].tap()
+        let stop = app.buttons["停止自动翻页"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 5))
+        stop.tap()
         attachScreenshot(app)
     }
 

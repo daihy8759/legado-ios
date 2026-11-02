@@ -18,6 +18,7 @@ struct ReaderStylePreset: Identifiable {
 
     static let legadoDefaults: [ReaderStylePreset] = [
         .init(id: "wechat", name: "微信读书", background: UIColor(hex: 0xC0EDC6), foreground: UIColor(hex: 0x0B0B0B)),
+        .init(id: "ink", name: "水墨江湖", background: UIColor(hex: 0xF2EDE3), foreground: UIColor(hex: 0x252E2B)),
         .init(id: "preset1", name: "预设1", background: UIColor(hex: 0xFFFFFF), foreground: UIColor(hex: 0x000000)),
         .init(id: "preset2", name: "预设2", background: UIColor(hex: 0xDDC090), foreground: UIColor(hex: 0x3E3422)),
         .init(id: "preset3", name: "预设3", background: UIColor(hex: 0xC2D8AA), foreground: UIColor(hex: 0x596C44)),
@@ -41,6 +42,21 @@ struct ReaderStylePreset: Identifiable {
         }
         return legadoDefaults.first(where: { $0.id == migratedID }) ?? legadoDefaults[0]
     }
+
+    // Keep the artwork much quieter than the bookshelf so text stays legible.
+    static let inkBackgroundImage: UIImage? = {
+        guard let artwork = UIImage(named: "InkLandscape") else { return nil }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: artwork.size, format: format)
+        return renderer.image { context in
+            let bounds = CGRect(origin: .zero, size: artwork.size)
+            UIColor(hex: 0xF2EDE3).setFill()
+            context.fill(bounds)
+            artwork.draw(in: bounds, blendMode: .normal, alpha: 0.18)
+        }
+    }()
 }
 
 private extension UIColor {

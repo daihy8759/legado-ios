@@ -18,7 +18,7 @@ struct RootTabView: View {
         let initial: Tab = switch requested {
         case "explore": .explore
         case "statistics": .statistics
-        case "settings": .my
+        case "settings", "themes": .my
         default:
             switch UserDefaults.standard.string(forKey: "defaultHomePage") {
             case "explore": .explore
@@ -72,7 +72,7 @@ struct RootTabView: View {
                     showsDemoReader = ProcessInfo.processInfo.arguments.contains("-uiDemoReader")
                 }
             }
-                .tabItem { Label("书架", systemImage: "book.fill") }
+                .tabItem { Label("书架", systemImage: themeMode == "4" ? "books.vertical" : "book.fill") }
                 .tag(Tab.bookshelf)
 
             ReadingNavigationStack { ExploreView() }
@@ -80,7 +80,7 @@ struct RootTabView: View {
                 .tag(Tab.explore)
 
             ReadingNavigationStack { ReadingStatisticsView() }
-                .tabItem { Label("统计", systemImage: "chart.bar") }
+                .tabItem { Label("统计", systemImage: themeMode == "4" ? ReadingTheme.mountainSymbol : "chart.bar") }
                 .tag(Tab.statistics)
 
             ReadingNavigationStack {
@@ -96,15 +96,18 @@ struct RootTabView: View {
                     AboutView()
                 } else if ProcessInfo.processInfo.arguments.contains("-uiDemoLogs") {
                     DiagnosticLogView()
+                } else if requestedDemoPage == "themes" {
+                    AppThemeView()
                 } else {
                     SettingsView()
                 }
             }
-                .tabItem { Label("我的", systemImage: "person.crop.circle") }
+                .tabItem { Label("我的", systemImage: themeMode == "4" ? "seal" : "person.crop.circle") }
                 .tag(Tab.my)
         }
+        .id(themeMode)
         .readingTabBarBackground()
-        .preferredColorScheme(themeMode == "2" ? .dark : (themeMode == "1" || themeMode == "3" ? .light : nil))
+        .preferredColorScheme(themeMode == "2" ? .dark : (["1", "3", "4"].contains(themeMode) ? .light : nil))
         .transaction { transaction in
             if themeMode == "3" { transaction.animation = nil }
         }
@@ -155,6 +158,7 @@ private struct BookshelfView: View {
     @State private var selectedGroupID = BookGroup.idAll
     @State private var showsGroupManager = false
     @AppStorage("bookshelfLayout") private var bookshelfLayout = "grid3"
+    @AppStorage("themeMode") private var themeMode = "0"
 
     private var selectedGroup: BookGroup {
         library.visibleGroups.first(where: { $0.id == selectedGroupID })
@@ -187,7 +191,7 @@ private struct BookshelfView: View {
                     if displayedBooks.isEmpty {
                         EmptyBookshelfHero { showsLocalImporter = true }
                     } else {
-                        if let book = recentBook {
+                        if let book = recentBook, themeMode != "4" {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text("继续阅读")
                                     .font(.subheadline.weight(.medium))
@@ -213,7 +217,7 @@ private struct BookshelfView: View {
                         } else {
                             ForEach(displayedBooks) { book in
                                 BookshelfBookLink(book: book, compact: bookshelfLayout == "compact", grid: false)
-                                if book.id != displayedBooks.last?.id {
+                                if book.id != displayedBooks.last?.id, themeMode != "4" {
                                     Rectangle().fill(ReadingTheme.separator).frame(height: 0.5)
                                         .padding(.leading, bookshelfLayout == "compact" ? 54 : 66)
                                 }
@@ -225,7 +229,13 @@ private struct BookshelfView: View {
                 .padding(.bottom, 32)
             }
         }
-        .background(ReadingTheme.canvas)
+        .background {
+            if themeMode == "4" {
+                InkLandscapeBackground().ignoresSafeArea()
+            } else {
+                ReadingTheme.canvas
+            }
+        }
         .navigationBarHidden(true)
         .readingLocalBookFileImporter(isPresented: $showsLocalImporter) { files in
             pendingLocalFiles = files
@@ -767,6 +777,7 @@ struct BookshelfReadView: View {
 }
 
 private struct BookshelfRow: View {
+    @AppStorage("themeMode") private var themeMode = "0"
     let book: Book
     var compact = false
     @ScaledMetric(relativeTo: .body) private var coverWidth = 52
@@ -782,6 +793,69 @@ private struct BookshelfRow: View {
     }
 
     var body: some View {
+        Group {
+            if themeMode == "4", !compact {
+                inkRow
+            } else {
+                standardRow
+            }
+        }
+    }
+
+    private var inkRow: some View {
+        HStack(alignment: .top, spacing: 14) {
+            BookCoverArtwork(
+                title: book.name, author: book.author, remoteURL: book.coverUrl,
+                width: coverWidth * 1.25, height: coverWidth * 1.78
+            )
+            .shadow(color: .black.opacity(0.08), radius: 6, x: 0, y: 3)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(book.name)
+                        .font(.system(.headline, design: .serif))
+                        .foregroundStyle(ReadingTheme.ink)
+                        .lineLimit(2)
+                    Spacer(minLength: 4)
+                    Text("\(Int((BookReadingPresentation.progress(book) * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(ReadingTheme.cinnabar)
+                }
+                Text(book.author.isEmpty ? "未知作者" : book.author)
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Label(readingPosition, systemImage: "bookmark.fill")
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                if let latest = book.latestChapterTitle, !latest.isEmpty {
+                    Label(latest, systemImage: "arrow.up.circle")
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+                HStack(spacing: 6) {
+                    inkTag(book.origin == "local" ? "本地藏书" : "在线书籍")
+                    if book.totalChapterNum > 0 { inkTag("\(book.totalChapterNum)章") }
+                    if book.lastCheckCount > 0 { inkTag("+\(book.lastCheckCount)章") }
+                }
+                .padding(.top, 2)
+                ReadingProgressLine(value: BookReadingPresentation.progress(book))
+                    .padding(.top, 5)
+            }
+        }
+        .padding(12)
+        .background(ReadingTheme.surface.opacity(0.74), in: RoundedRectangle(cornerRadius: 16))
+        .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.65), lineWidth: 0.75) }
+        .padding(.bottom, 12)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+
+    private func inkTag(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(ReadingTheme.cinnabar)
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(.white.opacity(0.5), in: Capsule())
+            .overlay { Capsule().strokeBorder(ReadingTheme.separator, lineWidth: 0.5) }
+    }
+
+    private var standardRow: some View {
         HStack(alignment: .center, spacing: 14) {
             BookCoverArtwork(
                 title: book.name,
@@ -1271,8 +1345,11 @@ private struct SettingsView: View {
                         readingSection
                         rulesSection
                         settingSection("文件与存储") {
-                            settingLink("文件管理", icon: "folder", showsSeparator: false) {
+                            settingLink("文件管理", icon: "folder") {
                                 FileManagementView()
+                            }
+                            settingLink("远端存储", icon: "externaldrive.connected.to.line.below", showsSeparator: false) {
+                                RemoteStorageView()
                             }
                         }
                         supportSection
@@ -1281,7 +1358,7 @@ private struct SettingsView: View {
                     .padding(.bottom, 32)
                 }
                 .background(alignment: .top) {
-                    Image("ProfileHeader")
+                    Image(themeMode == "4" ? "InkLandscape" : "ProfileHeader")
                         .resizable()
                         .scaledToFill()
                         .frame(width: geometry.size.width, height: geometry.safeAreaInsets.top + 156)
@@ -1378,12 +1455,14 @@ private struct SettingsView: View {
     private var readingSection: some View {
         settingSection("阅读") {
             settingLink("阅读设置", icon: "textformat.size") { ReadingPreferencesView() }
+            settingLink("主题", icon: "paintpalette") { AppThemeView() }
             Menu {
                 Picker("外观", selection: $themeMode) {
                     Text("跟随系统").tag("0")
                     Text("浅色").tag("1")
                     Text("深色").tag("2")
                     Text("E-Ink 模式").tag("3")
+                    if themeMode == "4" { Text("水墨江湖").tag("4") }
                 }
             } label: {
                 settingRow("外观", icon: "circle.lefthalf.filled", value: appearanceTitle, showsValuePill: true)
@@ -1431,6 +1510,7 @@ private struct SettingsView: View {
         case "1": "浅色"
         case "2": "深色"
         case "3": "E-Ink 模式"
+        case "4": "水墨江湖"
         default: "跟随系统"
         }
     }
@@ -1515,8 +1595,8 @@ private struct SettingsView: View {
 }
 
 private enum ProfileTheme {
-    static let canvas = adaptive(0xF8F8F7, dark: 0x141416)
-    static let surface = adaptive(0xFFFFFF, dark: 0x232326)
+    static var canvas: Color { ReadingTheme.isInk ? ReadingTheme.canvas : adaptive(0xF8F8F7, dark: 0x141416) }
+    static var surface: Color { ReadingTheme.isInk ? ReadingTheme.surface : adaptive(0xFFFFFF, dark: 0x232326) }
     static let appCardTint = adaptive(0xFBF3EC, dark: 0x302923)
     static let ink = adaptive(0x171817, dark: 0xF3F0EC)
     static let secondary = adaptive(0x898A8C, dark: 0xA5A2A0)
@@ -2090,7 +2170,13 @@ private struct ReadingPreferencesView: View {
                     .lineSpacing(lineSpacing)
                     .foregroundStyle(Color(uiColor: ReaderStylePreset.resolve(theme).foreground))
                     .padding(.vertical, 12)
-                    .listRowBackground(Color(uiColor: ReaderStylePreset.resolve(theme).background))
+                    .listRowBackground(ZStack {
+                        if theme == "ink" {
+                            InkLandscapeBackground(opacity: 0.18)
+                        } else {
+                            Color(uiColor: ReaderStylePreset.resolve(theme).background)
+                        }
+                    })
             }
         }
         .navigationTitle("阅读设置")

@@ -57,6 +57,7 @@ final class BookLibraryModel: ObservableObject {
     private var groupSaveGeneration = 0
     private var persistedGroups: [BookGroup] = []
     private var deletingGroupIDs: Set<Int64> = []
+    private var hasLoaded = false
 
     init(
         repository: any BookRepository,
@@ -109,6 +110,7 @@ final class BookLibraryModel: ObservableObject {
     }
 
     func load() async {
+        hasLoaded = false
         do {
             async let storedBooks = repository.load()
             async let storedGroups = groupRepository.load()
@@ -117,8 +119,9 @@ final class BookLibraryModel: ObservableObject {
             groups = try await storedGroups
             persistedGroups = groups
             if groups.isEmpty {
-                await persistGroups([.init(groupId: BookGroup.idAll, groupName: "全部", order: 0)])
+                guard await persistGroups([.init(groupId: BookGroup.idAll, groupName: "全部", order: 0)]) else { return }
             }
+            hasLoaded = true
             for book in books where book.origin == "local" && book.coverUrl?.isEmpty != false {
                 guard !Task.isCancelled, let url = URL(string: book.bookUrl),
                       url.isFileURL, url.pathExtension.lowercased() == "epub" else { continue }
@@ -467,6 +470,41 @@ final class BookLibraryModel: ObservableObject {
     func clearUpdateMessage() { updateMessage = nil }
 
     func reportError(_ error: Error) { errorMessage = error.localizedDescription }
+
+    func synchronizationSnapshot() async throws -> BookshelfSyncInput {
+        guard hasLoaded else { throw LocalFileError.saveFailed(errorMessage ?? "书架尚未完成加载") }
+        while let task = bookSaveTask {
+            let generation = bookSaveGeneration
+            guard await task.value else { throw LocalFileError.saveFailed(errorMessage ?? "书架保存失败") }
+            if bookSaveGeneration == generation { bookSaveTask = nil }
+        }
+        while let task = groupSaveTask {
+            let generation = groupSaveGeneration
+            guard await task.value else { throw LocalFileError.saveFailed(errorMessage ?? "分组保存失败") }
+            if groupSaveGeneration == generation { groupSaveTask = nil }
+        }
+        return .init(books: books, groups: groups, localDirectory: localDirectory)
+    }
+
+    func applySynchronizedShelf(_ result: BookshelfSyncResult, startedWith base: BookshelfSyncInput) async throws {
+        let current = try await synchronizationSnapshot()
+        var merged = try BookshelfSyncReconciler.reconcile(base: base, current: current, incoming: result)
+        let previousGroups = groups
+        if merged.groups != groups, !(await persistGroups(merged.groups)) {
+            throw LocalFileError.saveFailed(errorMessage ?? "分组保存失败")
+        }
+        // Group persistence can suspend too; preserve edits made in that gap.
+        merged = try BookshelfSyncReconciler.reconcile(
+            base: base, current: .init(books: books, groups: groups, localDirectory: localDirectory), incoming: result
+        )
+        let oldURLs = Set(books.map(\.bookUrl))
+        guard await persist(merged.books) else {
+            let failure = errorMessage ?? "书架保存失败"
+            if groups == merged.groups { await persistGroups(previousGroups) }
+            throw LocalFileError.saveFailed(failure)
+        }
+        await cleanupRemovedBooks(oldURLs.subtracting(books.map(\.bookUrl)))
+    }
 
     @discardableResult
     private func persist(_ updated: [Book]) async -> Bool {

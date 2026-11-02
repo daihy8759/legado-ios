@@ -154,13 +154,46 @@ public struct KeyboardAssist: Codable, Hashable, Identifiable, Sendable {
 }
 
 public struct Server: Codable, Hashable, Identifiable, Sendable {
-    public enum ServerType: String, Codable, Sendable { case webDAV = "WEBDAV" }
+    public enum ServerType: String, Codable, CaseIterable, Sendable {
+        case webDAV = "WEBDAV", s3 = "S3", dropbox = "DROPBOX"
+        public var title: String {
+            switch self {
+            case .webDAV: "WebDAV"
+            case .s3: "S3"
+            case .dropbox: "Dropbox"
+            }
+        }
+    }
     public struct WebDAVConfig: Codable, Hashable, Sendable {
         public var url: String
         public var username: String
         public var password: String
         public init(url: String, username: String, password: String) {
             self.url = url; self.username = username; self.password = password
+        }
+    }
+    public struct S3Config: Codable, Hashable, Sendable {
+        public var endpoint: String
+        public var region: String
+        public var bucket: String
+        public var accessKey: String
+        public var secretKey: String
+        public var sessionToken: String
+        public var prefix: String
+        public var pathStyle: Bool
+        public init(endpoint: String = "", region: String = "us-east-1", bucket: String = "",
+                    accessKey: String = "", secretKey: String = "", sessionToken: String = "",
+                    prefix: String = "", pathStyle: Bool = true) {
+            self.endpoint = endpoint; self.region = region; self.bucket = bucket
+            self.accessKey = accessKey; self.secretKey = secretKey; self.sessionToken = sessionToken
+            self.prefix = prefix; self.pathStyle = pathStyle
+        }
+    }
+    public struct DropboxConfig: Codable, Hashable, Sendable {
+        public var accessToken: String
+        public var rootPath: String
+        public init(accessToken: String = "", rootPath: String = "") {
+            self.accessToken = accessToken; self.rootPath = rootPath
         }
     }
     public var id: Int64
@@ -174,6 +207,17 @@ public struct Server: Codable, Hashable, Identifiable, Sendable {
     public var webDAVConfig: WebDAVConfig? {
         guard type == .webDAV, let config else { return nil }
         return try? JSONDecoder().decode(WebDAVConfig.self, from: Data(config.utf8))
+    }
+    public var s3Config: S3Config? {
+        guard type == .s3, let config else { return nil }
+        return try? JSONDecoder().decode(S3Config.self, from: Data(config.utf8))
+    }
+    public var dropboxConfig: DropboxConfig? {
+        guard type == .dropbox, let config else { return nil }
+        return try? JSONDecoder().decode(DropboxConfig.self, from: Data(config.utf8))
+    }
+    public mutating func setConfiguration<T: Encodable>(_ value: T) throws {
+        config = String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
     }
 }
 

@@ -3,16 +3,72 @@ import UIKit
 
 private final class ReaderLayoutTextView: UITextView {
     var onLayout: ((UITextView) -> Void)?
+    var clipsPagedText = false
     private var reportedSize = CGSize.zero
     private var reportedContentSize = CGSize.zero
+    private let pageMask = CAShapeLayer()
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        if clipsPagedText, bounds.width > 0, bounds.height > 0 {
+            var top = textContainerInset.top
+            if layoutManager.numberOfGlyphs > 0 {
+                let glyph = layoutManager.glyphIndex(for: CGPoint(x: 0, y: bounds.minY), in: textContainer)
+                let line = layoutManager.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: nil)
+                let lineTop = line.minY + textContainerInset.top - bounds.minY
+                let lineBottom = line.maxY + textContainerInset.top - bounds.minY
+                if lineTop < top - 0.5, lineBottom > top { top = lineBottom }
+            }
+            pageMask.frame = bounds
+            pageMask.path = UIBezierPath(rect: CGRect(
+                x: 0, y: top, width: bounds.width,
+                height: max(0, bounds.height - top - textContainerInset.bottom)
+            )).cgPath
+            layer.mask = pageMask
+        } else {
+            layer.mask = nil
+        }
         guard bounds.width > 0, bounds.height > 0,
               bounds.size != reportedSize || contentSize != reportedContentSize else { return }
         reportedSize = bounds.size
         reportedContentSize = contentSize
         onLayout?(self)
+    }
+}
+
+@MainActor
+enum ReaderPageLayout {
+    static func pagedBottomInset(configured: CGFloat, fontSize: CGFloat, lineSpacing: CGFloat) -> CGFloat {
+        max(configured, fontSize * 1.3 + max(lineSpacing, 0))
+    }
+
+    static func offsets(in view: UITextView) -> [CGFloat] {
+        let minimum = -view.adjustedContentInset.top
+        let maximum = max(view.contentSize.height - view.bounds.height + view.adjustedContentInset.bottom, minimum)
+        let height = max(view.bounds.height - view.adjustedContentInset.top - view.adjustedContentInset.bottom
+                         - view.textContainerInset.top - view.textContainerInset.bottom, 1)
+        guard maximum > minimum + 0.5 else { return [minimum] }
+        view.layoutManager.ensureLayout(for: view.textContainer)
+        let glyphCount = view.layoutManager.numberOfGlyphs
+        guard glyphCount > 0 else { return [minimum] }
+        var lines: [(top: CGFloat, bottom: CGFloat)] = []
+        view.layoutManager.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: glyphCount)) {
+            rect, usedRect, _, _, _ in
+            lines.append((rect.minY, usedRect.maxY))
+        }
+        var offsets = [minimum]
+        var nextLine = 0
+        while let current = offsets.last, current < maximum - 0.5 {
+            let bottom = current + view.bounds.height - view.adjustedContentInset.bottom
+                - view.textContainerInset.bottom - view.textContainerInset.top
+            while nextLine < lines.count, lines[nextLine].bottom <= bottom + 0.5 { nextLine += 1 }
+            guard nextLine < lines.count else { break }
+            let lineOffset = lines[nextLine].top - view.adjustedContentInset.top
+            let next = min(lineOffset > current + 0.5 ? lineOffset : current + height, maximum)
+            guard next > current + 0.5 else { break }
+            offsets.append(next)
+        }
+        return offsets
     }
 }
 
@@ -60,6 +116,8 @@ struct ReaderTextView: UIViewRepresentable {
     @Binding var totalPages: Int
     let isAutoReading: Bool
     let isAutoReadPaused: Bool
+    let isAutoFlipping: Bool
+    let autoFlipInterval: Double
     let isLoadingNextChapter: Bool
     let secondsPerScreen: Double
     let onReachedEnd: (Int) -> Void
@@ -88,6 +146,7 @@ struct ReaderTextView: UIViewRepresentable {
         }
         view.accessibilityIdentifier = "reader.text"
         let effectivePageAnimation = isEInkMode ? 4 : pageAnimation
+        view.clipsPagedText = effectivePageAnimation != 3
         view.backgroundColor = backgroundColor
         view.isOpaque = backgroundColor != .clear
         view.delegate = context.coordinator
@@ -95,6 +154,7 @@ struct ReaderTextView: UIViewRepresentable {
         view.isSelectable = false
         view.alwaysBounceVertical = effectivePageAnimation == 3
         view.isScrollEnabled = true
+        view.contentInsetAdjustmentBehavior = .never
         view.panGestureRecognizer.isEnabled = effectivePageAnimation == 3
         view.textContainer.lineFragmentPadding = 4
         view.showsVerticalScrollIndicator = false
@@ -114,6 +174,10 @@ struct ReaderTextView: UIViewRepresentable {
             context.coordinator.lastViewportSize = view.bounds.size
         }
         let effectivePageAnimation = isEInkMode ? 4 : pageAnimation
+        if let view = view as? ReaderLayoutTextView {
+            view.clipsPagedText = effectivePageAnimation != 3
+            view.setNeedsLayout()
+        }
         view.isSelectable = false
         view.alwaysBounceVertical = effectivePageAnimation == 3
         view.isScrollEnabled = true
@@ -223,6 +287,11 @@ struct ReaderTextView: UIViewRepresentable {
             isPaused: isAutoReadPaused,
             secondsPerScreen: secondsPerScreen
         )
+        context.coordinator.updateAutoFlip(
+            isRunning: isAutoFlipping,
+            isPaused: isAutoReadPaused,
+            interval: autoFlipInterval
+        )
         // SwiftUI can reset the bindings after the chapter's TextKit layout has
         // already completed. Reconcile them even when the text/style is unchanged.
         if view.bounds.width > 0, view.bounds.height > 0 {
@@ -252,7 +321,10 @@ struct ReaderTextView: UIViewRepresentable {
         var lastViewportSize = CGSize.zero
         private var isAutoReading = false
         private var isAutoReadPaused = false
+        private var isAutoFlipping = false
         private var secondsPerScreen = 10.0
+        private var autoFlipInterval: Double = 12
+        private var flipElapsed: CFTimeInterval = 0
         private weak var textView: UITextView?
         private var displayLink: CADisplayLink?
         private var lastTimestamp: CFTimeInterval = 0
@@ -276,6 +348,8 @@ struct ReaderTextView: UIViewRepresentable {
         private var autoPageTarget: CGFloat?
         private weak var autoPageOverlay: UIImageView?
         private var pageRangeRetryCount = 0
+        private var pageOffsetsKey = ""
+        private var cachedPageOffsets: [CGFloat] = []
         private weak var nextSwipe: UISwipeGestureRecognizer?
         private weak var previousSwipe: UISwipeGestureRecognizer?
         private weak var readerTap: UITapGestureRecognizer?
@@ -394,6 +468,18 @@ struct ReaderTextView: UIViewRepresentable {
             }
         }
 
+        func updateAutoFlip(isRunning: Bool, isPaused: Bool, interval: Double) {
+            let wasRunning = isAutoFlipping
+            isAutoFlipping = isRunning
+            autoFlipInterval = max(1, interval)
+            if !wasRunning, isRunning {
+                flipElapsed = 0
+                lastTimestamp = 0
+            } else if wasRunning, !isRunning {
+                flipElapsed = 0
+            }
+        }
+
         func resetAutoReadForPageChange() {
             didReachEnd = false
             didReachStart = false
@@ -402,6 +488,7 @@ struct ReaderTextView: UIViewRepresentable {
             didEnterContinuation = false
             pendingPreviousPosition = nil
             pendingContinuationPosition = nil
+            flipElapsed = 0
             resetAutoPage()
         }
 
@@ -409,7 +496,7 @@ struct ReaderTextView: UIViewRepresentable {
             guard !view.text.isEmpty else { return }
             layoutGeneration &+= 1
             let generation = layoutGeneration
-            let prefix = characterPosition == 0 && parent.pageAnimation == 3
+            let prefix = characterPosition == 0
                 ? currentSectionStart
                 : renderedPrefixLength
             let location = ReaderPositionResolver.renderedLocation(
@@ -427,10 +514,9 @@ struct ReaderTextView: UIViewRepresentable {
                 ).origin
                 point.y += view.textContainerInset.top
                 let limits = self.scrollLimits(for: view)
-                let target = min(
-                    max(point.y - view.adjustedContentInset.top, limits.minimum),
-                    limits.maximum
-                )
+                let target = characterPosition == 0 && self.currentSectionStart == 0
+                    ? limits.minimum
+                    : min(max(point.y - view.textContainerInset.top - view.adjustedContentInset.top, limits.minimum), limits.maximum)
                 view.setContentOffset(CGPoint(x: 0, y: target), animated: false)
             }
         }
@@ -455,6 +541,19 @@ struct ReaderTextView: UIViewRepresentable {
             return (minimum, maximum)
         }
 
+        private func pageOffsets(for view: UITextView) -> [CGFloat] {
+            let key = "\(styleKey)|\(view.bounds.size)|\(view.contentSize)|\(view.textContainerInset)|\(view.adjustedContentInset)"
+            if key != pageOffsetsKey || cachedPageOffsets.isEmpty {
+                cachedPageOffsets = ReaderPageLayout.offsets(in: view)
+                pageOffsetsKey = key
+            }
+            return cachedPageOffsets
+        }
+
+        private func pageIndex(for view: UITextView, offsets: [CGFloat]) -> Int {
+            offsets.lastIndex(where: { $0 <= view.contentOffset.y + 0.5 }) ?? 0
+        }
+
         private func pageMetrics(for view: UITextView) -> (current: Int, total: Int) {
             let pageHeight = readingViewportHeight(for: view)
             if parent.pageAnimation == 3, currentBodyEnd > currentSectionStart {
@@ -474,15 +573,8 @@ struct ReaderTextView: UIViewRepresentable {
                     return (min(Int(floor(position / pageHeight)) + 1, total), total)
                 }
             }
-            let limits = scrollLimits(for: view)
-            let scrollRange = max(limits.maximum - limits.minimum, 0)
-            let total = max(Int(ceil(scrollRange / pageHeight)) + 1, 1)
-            guard total > 1 else { return (1, 1) }
-            let position = min(max(view.contentOffset.y - limits.minimum, 0), scrollRange)
-            let current = position >= scrollRange - 0.5
-                ? total
-                : min(Int(floor(position / pageHeight)) + 1, total)
-            return (current, total)
+            let offsets = pageOffsets(for: view)
+            return (pageIndex(for: view, offsets: offsets) + 1, offsets.count)
         }
 
         private func renderedCharacter(at offset: CGPoint, in view: UITextView) -> Int {
@@ -612,18 +704,14 @@ struct ReaderTextView: UIViewRepresentable {
             guard !view.text.isEmpty else { return }
             view.layoutManager.ensureLayout(for: view.textContainer)
             let pageHeight = readingViewportHeight(for: view)
-            let limits = scrollLimits(for: view)
-            let metrics = pageMetrics(for: view)
+            let offsets = pageOffsets(for: view)
             var ranges: [NSRange] = []
-            for page in 0..<metrics.total {
-                let offset = page == metrics.total - 1
-                    ? limits.maximum
-                    : min(limits.minimum + CGFloat(page) * pageHeight, limits.maximum)
+            for (page, offset) in offsets.enumerated() {
                 let rect = CGRect(
                     x: 0,
-                    y: max(0, offset + view.textContainerInset.top),
+                    y: max(0, offset + view.adjustedContentInset.top),
                     width: max(view.textContainer.size.width, 1),
-                    height: pageHeight
+                    height: page + 1 < offsets.count ? max(1, offsets[page + 1] - offset - 0.01) : pageHeight
                 )
                 let glyphRange = view.layoutManager.glyphRange(
                     forBoundingRect: rect,
@@ -769,18 +857,20 @@ struct ReaderTextView: UIViewRepresentable {
 
         private func turnPage(_ direction: Int) {
             guard !isTurningPage, let view = textView else { return }
-            if isAutoReading { resetAutoReadForPageChange() }
-            let pageHeight = readingViewportHeight(for: view)
-            let (minimum, maximum) = scrollLimits(for: view)
-            let target = min(max(view.contentOffset.y + CGFloat(direction) * pageHeight, minimum), maximum)
-            if direction < 0, view.contentOffset.y <= minimum + 0.5 {
+            if isAutoReading || isAutoFlipping { resetAutoReadForPageChange() }
+            let offsets = pageOffsets(for: view)
+            let index = pageIndex(for: view, offsets: offsets)
+            if direction < 0, index == 0, view.contentOffset.y <= offsets[0] + 0.5 {
                 parent.onReachedStart(contentCharacter(at: view.contentOffset, in: view))
                 return
             }
-            if direction > 0, view.contentOffset.y >= maximum - 0.5 {
+            if direction > 0, index == offsets.count - 1 {
                 parent.onReachedEnd(contentCharacter(at: view.contentOffset, in: view))
                 return
             }
+            let targetIndex = direction > 0 ? min(index + 1, offsets.count - 1)
+                : (view.contentOffset.y > offsets[index] + 0.5 ? index : max(index - 1, 0))
+            let target = offsets[targetIndex]
             isTurningPage = true
             let completion: (Bool) -> Void = { [weak self] _ in self?.isTurningPage = false }
             switch parent.isEInkMode ? 4 : parent.pageAnimation {
@@ -828,10 +918,10 @@ struct ReaderTextView: UIViewRepresentable {
         }
 
         private func prepareAutoPage(in view: UITextView) -> Bool {
-            let pageHeight = readingViewportHeight(for: view)
-            let maximum = scrollLimits(for: view).maximum
-            guard view.contentOffset.y < maximum - 0.5 else { return false }
-            let target = min(view.contentOffset.y + pageHeight, maximum)
+            let offsets = pageOffsets(for: view)
+            let index = pageIndex(for: view, offsets: offsets)
+            guard index + 1 < offsets.count else { return false }
+            let target = offsets[index + 1]
             let originalOffset = view.contentOffset
             isRenderingAutoPage = true
             view.setContentOffset(CGPoint(x: 0, y: target), animated: false)
@@ -887,30 +977,37 @@ struct ReaderTextView: UIViewRepresentable {
             guard eInkElapsed >= eInkPageInterval else { return }
             eInkElapsed = 0
             eInkPageInterval = secondsPerScreen
-            let pageHeight = readingViewportHeight(for: view)
-            let maximum = scrollLimits(for: view).maximum
-            guard view.contentOffset.y < maximum - 0.5 else {
+            let offsets = pageOffsets(for: view)
+            let index = pageIndex(for: view, offsets: offsets)
+            guard index + 1 < offsets.count else {
                 guard !didReachEnd else { return }
                 didReachEnd = true
                 parent.onReachedEnd(contentCharacter(at: view.contentOffset, in: view))
                 return
             }
             didReachEnd = false
-            let target = min(view.contentOffset.y + pageHeight, maximum)
+            let target = offsets[index + 1]
             view.setContentOffset(CGPoint(x: 0, y: target), animated: false)
         }
 
+        private func advanceAutoFlip(elapsed: CFTimeInterval) {
+            // Hold the countdown while a turn animation is still settling so
+            // the interval always measures a full resting page.
+            guard !isTurningPage else { return }
+            flipElapsed += elapsed
+            guard flipElapsed >= autoFlipInterval else { return }
+            turnPage(1)
+        }
+
         @objc private func step(_ link: CADisplayLink) {
-            guard isAutoReading, !isAutoReadPaused, !isUserDragging, let view = textView else {
-                lastTimestamp = link.timestamp
-                return
-            }
-            guard lastTimestamp > 0 else {
-                lastTimestamp = link.timestamp
-                return
-            }
+            defer { lastTimestamp = link.timestamp }
+            guard isAutoReading || isAutoFlipping, !isAutoReadPaused, !isUserDragging, let view = textView else { return }
+            guard lastTimestamp > 0 else { return }
             let elapsed = link.timestamp - lastTimestamp
-            lastTimestamp = link.timestamp
+            if isAutoFlipping {
+                advanceAutoFlip(elapsed: elapsed)
+                return
+            }
             if parent.isEInkMode {
                 advanceEInkAutoRead(in: view, elapsed: elapsed)
                 return

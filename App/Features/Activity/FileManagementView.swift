@@ -110,6 +110,9 @@ struct FileManagementView: View {
             else { cachedBooksSection }
             if !selecting {
                 Section {
+                    NavigationLink { RemoteStorageView() } label: {
+                        Label("远端存储", systemImage: "externaldrive.connected.to.line.below")
+                    }
                     NavigationLink { CacheManagementView() } label: {
                         Label("章节缓存与空间清理", systemImage: "internaldrive")
                     }

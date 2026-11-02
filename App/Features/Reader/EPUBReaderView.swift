@@ -136,6 +136,11 @@ final class EPUBReaderModel: ObservableObject, EPUBNavigatorDelegate {
         showsControls.toggle()
     }
 
+    func navigatorContentInset(_ navigator: VisualNavigator) -> UIEdgeInsets? {
+        // SwiftUI already places the navigator inside the safe area.
+        .zero
+    }
+
     func clearError() { errorMessage = nil }
 
     private func link(for chapter: BookChapter) -> ReadiumShared.Link? {
@@ -176,7 +181,9 @@ struct EPUBReaderView: View {
     }
 
     private var preferences: EPUBPreferences {
-        EPUBPreferences(fontSize: fontScale, publisherStyles: publisherStyles, scroll: scroll,
+        EPUBPreferences(backgroundColor: theme == "ink" ? ReadiumNavigator.Color(rawValue: 0xF2EDE3) : nil,
+                        fontSize: fontScale, publisherStyles: publisherStyles, scroll: scroll,
+                        textColor: theme == "ink" ? ReadiumNavigator.Color(rawValue: 0x252E2B) : nil,
                         theme: theme == "sepia" ? .sepia : (theme == "dark" || (theme == "system" && colorScheme == .dark) ? .dark : .light))
     }
 
@@ -200,7 +207,10 @@ struct EPUBReaderView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             if model.showsControls, model.navigator != nil { bottomBar }
         }
-        .background(Color(uiColor: .systemBackground))
+        .background {
+            (theme == "ink" ? ReadingTheme.inkPaper : Color(uiColor: .systemBackground))
+                .ignoresSafeArea()
+        }
         .navigationBarHidden(true)
         .readingTabBarHidden()
         .task {
@@ -328,6 +338,7 @@ struct EPUBReaderView: View {
                         Text("跟随系统").tag("system")
                         Text("白色").tag("light")
                         Text("纸色").tag("sepia")
+                        Text("水墨江湖").tag("ink")
                         Text("夜间").tag("dark")
                     }
                 }

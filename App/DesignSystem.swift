@@ -77,6 +77,10 @@ private struct ReadingUnavailableLabelStyle: LabelStyle {
 }
 
 extension View {
+    func readingPageBackground() -> some View {
+        background(ReadingPageBackground())
+    }
+
     /// Keep filled controls dark in both appearances, independently of icon tint.
     func readingProminentButtonStyle() -> some View {
         buttonStyle(.borderedProminent)
@@ -166,25 +170,44 @@ private struct ReadingSearchModifier: ViewModifier {
     }
 }
 
+private struct ReadingPageBackground: View {
+    @AppStorage("themeMode") private var themeMode = "0"
+
+    var body: some View {
+        if themeMode == "4" {
+            InkLandscapeBackground().ignoresSafeArea()
+        } else {
+            ReadingTheme.canvas
+        }
+    }
+}
+
 enum ReadingTheme {
-    static let accent = adaptive(0x171717, dark: 0xDADAE0)
-    static let accentFill = adaptive(0x171717, dark: 0x414148)
-    static let emphasisSurface = adaptive(0x171717, dark: 0x29292E)
-    static let selectionBorder = adaptive(0x171717, dark: 0x777780)
-    static let toggleTint = Color(uiColor: .systemGreen)
-    static let accentSoft = adaptive(0xEEEEEF, dark: 0x29292C)
-    static let coral = Color(red: 0.76, green: 0.48, blue: 0.27)
+    static var isInk: Bool { UserDefaults.standard.string(forKey: "themeMode") == "4" }
+    static var mountainSymbol: String {
+        if #available(iOS 17.0, *) { return "mountain.2" }
+        return "triangle"
+    }
+    static let cinnabar = Color(red: 0.61, green: 0.21, blue: 0.19)
+    static let inkPaper = Color(red: 0.949, green: 0.929, blue: 0.890)
+    static let accent = adaptive(0x171717, dark: 0xDADAE0, ink: 0x9B3631)
+    static let accentFill = adaptive(0x171717, dark: 0x414148, ink: 0x92352F)
+    static let emphasisSurface = adaptive(0x171717, dark: 0x29292E, ink: 0x343F3A)
+    static let selectionBorder = adaptive(0x171717, dark: 0x777780, ink: 0x9B3631)
+    static var toggleTint: Color { isInk ? cinnabar : Color(uiColor: .systemGreen) }
+    static let accentSoft = adaptive(0xEEEEEF, dark: 0x29292C, ink: 0xE8E2D6)
+    static var coral: Color { isInk ? cinnabar : Color(red: 0.76, green: 0.48, blue: 0.27) }
     static let paper = Color(red: 0.965, green: 0.945, blue: 0.895)
-    static let ink = Color.primary
-    static let canvas = adaptive(0xFCFCFC, dark: 0x111113)
-    static let groupedCanvas = adaptive(0xF3F3F4, dark: 0x1C1C1F)
-    static let surface = adaptive(0xFFFFFF, dark: 0x232326)
-    static let separator = adaptive(0xE6E6E8, dark: 0x363639)
+    static let ink = adaptive(0x171717, dark: 0xF2F2F2, ink: 0x252E2B)
+    static let canvas = adaptive(0xFCFCFC, dark: 0x111113, ink: 0xF2EDE3)
+    static let groupedCanvas = adaptive(0xF3F3F4, dark: 0x1C1C1F, ink: 0xEBE7DE)
+    static let surface = adaptive(0xFFFFFF, dark: 0x232326, ink: 0xFAF7F0)
+    static let separator = adaptive(0xE6E6E8, dark: 0x363639, ink: 0xD9D5CA)
     static let onAccent = Color.white
 
-    private static func adaptive(_ light: UInt32, dark: UInt32) -> Color {
+    private static func adaptive(_ light: UInt32, dark: UInt32, ink: UInt32? = nil) -> Color {
         Color(uiColor: UIColor { traits in
-            let hex = traits.userInterfaceStyle == .dark ? dark : light
+            let hex = isInk ? (ink ?? light) : (traits.userInterfaceStyle == .dark ? dark : light)
             return UIColor(
                 red: CGFloat((hex >> 16) & 0xff) / 255,
                 green: CGFloat((hex >> 8) & 0xff) / 255,
@@ -196,6 +219,7 @@ enum ReadingTheme {
 }
 
 struct ReadingPageHeader<Actions: View>: View {
+    @AppStorage("themeMode") private var themeMode = "0"
     let title: String
     let subtitle: String
     @ViewBuilder var actions: Actions
@@ -204,13 +228,14 @@ struct ReadingPageHeader<Actions: View>: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 16) {
                 Text(title)
-                    .font(.largeTitle.bold())
+                    .font(themeMode == "4" ? .system(.largeTitle, design: .serif).weight(.semibold) : .largeTitle.bold())
                     .foregroundStyle(ReadingTheme.ink)
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 0)
                 HStack(spacing: 10) { actions }
             }
-            Text(subtitle)
+            Text(themeMode == "4" && title == "书架" ? "一卷山河 · 万里剑气" : subtitle)
+                .tracking(themeMode == "4" ? 3 : 0)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
@@ -222,6 +247,7 @@ struct ReadingPageHeader<Actions: View>: View {
 }
 
 struct ReadingToolbarIcon: View {
+    @AppStorage("themeMode") private var themeMode = "0"
     let systemName: String
 
     var body: some View {
@@ -230,6 +256,46 @@ struct ReadingToolbarIcon: View {
             .foregroundStyle(ReadingTheme.accent)
             .frame(width: 44, height: 44)
             .background(ReadingTheme.groupedCanvas, in: Circle())
+            .overlay {
+                if themeMode == "4" {
+                    Circle().strokeBorder(.white.opacity(0.85), lineWidth: 1)
+                }
+            }
+            .accessibilityHidden(true)
+    }
+}
+
+struct InkLandscapeBackground: View {
+    var opacity: Double = 0.38
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                ReadingTheme.inkPaper
+                Image("InkLandscape")
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .opacity(opacity)
+            }
+            .clipped()
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+struct InkSeal: View {
+    var character = "阅"
+
+    var body: some View {
+        Text(character)
+            .font(.system(size: 17, weight: .medium, design: .serif))
+            .foregroundStyle(ReadingTheme.cinnabar)
+            .frame(width: 29, height: 32)
+            .overlay { Rectangle().strokeBorder(ReadingTheme.cinnabar, lineWidth: 1) }
+            .padding(3)
+            .overlay { Rectangle().strokeBorder(ReadingTheme.cinnabar.opacity(0.7), lineWidth: 0.5) }
             .accessibilityHidden(true)
     }
 }

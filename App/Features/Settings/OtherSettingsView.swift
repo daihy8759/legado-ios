@@ -30,6 +30,9 @@ struct OtherSettingsView: View {
             }
             Section("网络与存储") {
                 NavigationLink {
+                    RemoteStorageView()
+                } label: { Label("远端存储", systemImage: "externaldrive.connected.to.line.below") }
+                NavigationLink {
                     NetworkSettingsView()
                 } label: { Label("网络与缓存设置", systemImage: "network") }
                 NavigationLink {

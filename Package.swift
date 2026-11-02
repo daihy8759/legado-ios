@@ -53,7 +53,7 @@ let package = Package(
                 "Rules/RuleSubscriptionModel.swift",
                 "Sources/SourceLibraryModel.swift", "Rules/ReplaceRuleLibraryModel.swift", "Search/SearchViewModel.swift",
                 "Books/BookLibraryModel.swift", "Books/BookDetailViewModel.swift",
-                "Books/BookshelfReadViewModel.swift", "Reader/ReaderViewModel.swift"
+                "Books/BookshelfReadViewModel.swift", "Books/BookshelfSyncModel.swift", "Reader/ReaderViewModel.swift"
             ]
         ),
         .testTarget(

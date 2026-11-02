@@ -23,6 +23,7 @@ struct ReaderView: View {
     @State private var showsAutoReadControls = false
     @State private var showsStyleControls = false
     @State private var isAutoReading = false
+    @State private var isAutoFlipping = false
     @State private var showsReaderMenu = false
     @State private var followsSystemBrightness = true
     @State private var readerBrightness = Double(UIScreen.main.brightness)
@@ -97,6 +98,7 @@ struct ReaderView: View {
     @AppStorage("readerTheme") private var theme = "wechat"
     @AppStorage("readerPreviousDayTheme") private var previousDayTheme = "wechat"
     @AppStorage("autoReadSpeed") private var autoReadSpeed = 10
+    @AppStorage("autoFlipSpeed") private var autoFlipSpeed = 10
     @AppStorage("ttsFollowSys") private var ttsFollowSystem = true
     @AppStorage("ttsSpeechRate") private var ttsSpeechRate = 5
     @AppStorage("appTtsEngine") private var appTTSEngine = ""
@@ -198,6 +200,7 @@ struct ReaderView: View {
         readerCanvas
         .preferredColorScheme(resolvedStyle.id == "night" ? .dark : .light)
         .readingTabBarHidden()
+        .navigationBarHidden(true)
         .navigationBarBackButtonHidden(true)
         .background {
             ReaderInteractivePopEnabler()
@@ -245,6 +248,7 @@ struct ReaderView: View {
         }
         .onDisappear {
             isAutoReading = false
+            isAutoFlipping = false
             UIApplication.shared.isIdleTimerDisabled = false
             if speech.isSpeaking || speech.isPaused { speech.toggle(text: "") }
             saveProgress(immediate: true)
@@ -349,6 +353,9 @@ struct ReaderView: View {
         .onChange(of: isAutoReading) { _ in
             updateIdleTimer()
         }
+        .onChange(of: isAutoFlipping) { _ in
+            updateIdleTimer()
+        }
         .onChange(of: speech.isSpeaking) { _ in
             updateIdleTimer()
         }
@@ -378,6 +385,7 @@ struct ReaderView: View {
                 activity.beginReading(book)
             } else {
                 isAutoReading = false
+                isAutoFlipping = false
                 if !followsSystemBrightness {
                     UIScreen.main.brightness = CGFloat(brightnessBeforeReading)
                 }
@@ -390,12 +398,14 @@ struct ReaderView: View {
         }
         .onChange(of: themeMode) { _ in
             isAutoReading = false
+            isAutoFlipping = false
             readerJumpPosition = nil
             currentPage = 1
             totalPages = 1
         }
         .onChange(of: pageAnimation) { value in
             isAutoReading = false
+            isAutoFlipping = false
             saveProgress(immediate: true)
             readerJumpPosition = readerPosition
             currentPage = 1
@@ -412,16 +422,21 @@ struct ReaderView: View {
             readerContent
             readerMenuDismissOverlay
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background {
-            ZStack {
-                backgroundColor
-                if let backgroundImage = activeBackgroundImage {
-                    Image(uiImage: backgroundImage)
-                        .resizable()
-                        .scaledToFill()
+            GeometryReader { geometry in
+                ZStack {
+                    backgroundColor
+                    if let backgroundImage = activeBackgroundImage {
+                        Image(uiImage: backgroundImage)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: geometry.size.width, height: geometry.size.height)
+                    }
                 }
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .clipped()
             }
-            .clipped()
             .ignoresSafeArea()
         }
     }
@@ -467,7 +482,7 @@ struct ReaderView: View {
                 if footerVisible { readerTipBar(isHeader: false) }
             }
             .frame(maxWidth: readingColumnMaxWidth)
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .bottom) {
                 if let error = model.currentChapterError, !showsReaderMenu {
                     VStack(spacing: 10) {
@@ -514,6 +529,7 @@ struct ReaderView: View {
     private func openSourceSwitch() {
         stopSpeechIfNeeded()
         isAutoReading = false
+        isAutoFlipping = false
         saveProgress(immediate: true)
         showsReaderMenu = false
         sourceSwitchBook = model.bookForSourceSwitch(position: readerPosition)
@@ -567,7 +583,13 @@ struct ReaderView: View {
             paddingLeft: paddingLeft,
             paddingRight: paddingRight,
             paddingTop: paddingTop,
-            paddingBottom: paddingBottom,
+            paddingBottom: pageAnimation == 3
+                ? paddingBottom
+                : ReaderPageLayout.pagedBottomInset(
+                    configured: CGFloat(paddingBottom),
+                    fontSize: CGFloat(fontSize),
+                    lineSpacing: CGFloat(lineSpacing)
+                ),
             headerInset: 0,
             footerInset: 0,
             fontWeight: fontWeight,
@@ -592,6 +614,8 @@ struct ReaderView: View {
             totalPages: $totalPages,
             isAutoReading: isAutoReading,
             isAutoReadPaused: pausesAutoReading,
+            isAutoFlipping: isAutoFlipping,
+            autoFlipInterval: Double(autoFlipSpeed),
             isLoadingNextChapter: isWaitingForNextChapter,
             secondsPerScreen: Double(autoReadSpeed),
             onReachedEnd: { boundaryPosition in
@@ -611,6 +635,7 @@ struct ReaderView: View {
                     readerPosition = model.requestedPosition
                 } else {
                     isAutoReading = false
+                    isAutoFlipping = false
                 }
             },
             onReachedStart: { boundaryPosition in
@@ -683,7 +708,9 @@ struct ReaderView: View {
     }
 
     private var activeBackgroundImage: UIImage? {
-        themeMode != "3" && useBackgroundImage ? backgroundImage : nil
+        guard themeMode != "3" else { return nil }
+        if useBackgroundImage, let backgroundImage { return backgroundImage }
+        return resolvedStyle.id == "ink" ? ReaderStylePreset.inkBackgroundImage : nil
     }
 
     private var backgroundColor: Color {
@@ -861,10 +888,16 @@ struct ReaderView: View {
                 showsReaderMenu = false
                 showsBookmarks = true
             }
-            Button(isAutoReading ? "停止自动阅读" : "自动阅读", systemImage: isAutoReading ? "stop" : "play") {
-                if isAutoReading {
+            if isAutoFlipping {
+                Button("停止自动翻页", systemImage: "stop") {
+                    isAutoFlipping = false
+                }
+            } else if isAutoReading {
+                Button("停止自动阅读", systemImage: "stop") {
                     isAutoReading = false
-                } else {
+                }
+            } else {
+                Button("自动阅读", systemImage: "play") {
                     showsReaderMenu = false
                     showsAutoReadControls = true
                 }
@@ -1060,11 +1093,19 @@ struct ReaderView: View {
     private func startAutoReading() {
         stopSpeechIfNeeded()
         showsReaderMenu = false
+        isAutoFlipping = false
         isAutoReading = true
     }
 
+    private func startAutoFlipping() {
+        stopSpeechIfNeeded()
+        showsReaderMenu = false
+        isAutoReading = false
+        isAutoFlipping = true
+    }
+
     private func updateIdleTimer() {
-        UIApplication.shared.isIdleTimerDisabled = keepScreenOn || isAutoReading
+        UIApplication.shared.isIdleTimerDisabled = keepScreenOn || isAutoReading || isAutoFlipping
             || (readAloudWakeLock && speech.isSpeaking)
     }
 
@@ -1079,8 +1120,24 @@ struct ReaderView: View {
         ReadingNavigationStack {
             Form {
                 Section {
+                    Button("开始滚动阅读", systemImage: "play.fill") {
+                        showsAutoReadControls = false
+                        startAutoReading()
+                    }
+                    Button("开始自动翻页", systemImage: "arrow.right.circle") {
+                        showsAutoReadControls = false
+                        startAutoFlipping()
+                    }
+                    .disabled(pageAnimation == 3)
+                    Button(isAutoFlipping ? "停止自动翻页" : "停止自动阅读", systemImage: "stop.fill", role: .destructive) {
+                        isAutoReading = false
+                        isAutoFlipping = false
+                        showsAutoReadControls = false
+                    }
+                }
+                Section {
                     HStack {
-                        Text("自动翻页速度")
+                        Text("滚动速度")
                         Spacer()
                         Text("\(autoReadSpeed)s").monospacedDigit().foregroundStyle(.secondary)
                     }
@@ -1093,24 +1150,35 @@ struct ReaderView: View {
                         step: 1
                     )
                 } footer: {
-                    Text("数值表示自动阅读一屏所用的秒数，范围 1–120 秒。")
+                    Text("连续滚动模式：匀速滚过一屏所用的秒数，范围 1–120 秒。")
+                }
+                Section {
+                    HStack {
+                        Text("翻页间隔")
+                        Spacer()
+                        Text("\(autoFlipSpeed)s").monospacedDigit().foregroundStyle(.secondary)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(autoFlipSpeed) },
+                            set: { autoFlipSpeed = max(1, min(Int($0.rounded()), 120)) }
+                        ),
+                        in: 1...120,
+                        step: 1
+                    )
+                } footer: {
+                    Text(pageAnimation == 3
+                        ? "翻页模式适用于分页排版，滚动排版下请使用滚动模式。"
+                        : "翻页模式：每隔设定的秒数自动翻到下一页，使用当前选择的翻页动画，到达章节结尾会自动进入下一章。")
                 }
                 Section {
                     Button("目录", systemImage: "list.bullet") {
                         showsAutoReadControls = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { showsTableOfContents = true }
                     }
-                    Button("开始自动阅读", systemImage: "play.fill") {
-                        showsAutoReadControls = false
-                        startAutoReading()
-                    }
                     Button("主菜单", systemImage: "menubar.rectangle") {
                         showsAutoReadControls = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { showsReaderMenu = true }
-                    }
-                    Button("停止自动阅读", systemImage: "stop.fill", role: .destructive) {
-                        isAutoReading = false
-                        showsAutoReadControls = false
                     }
                     Button("设置", systemImage: "gearshape") {
                         showsAutoReadControls = false
@@ -1176,7 +1244,7 @@ struct ReaderView: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 12) {
                             ForEach(ReaderStylePreset.legadoDefaults) { preset in
-                                let isSelected = resolvedStyle.id == preset.id && activeBackgroundImage == nil
+                                let isSelected = resolvedStyle.id == preset.id && !useBackgroundImage
                                 Button {
                                     useBackgroundImage = false
                                     theme = preset.id
@@ -1565,6 +1633,7 @@ struct ReaderView: View {
             showsContentSearch = true
         case 13:
             isAutoReading = false
+            isAutoFlipping = false
             configureSpeech()
             if let engine = selectedHTTPEngine {
                 speech.pauseOrResumeHTTP(engine: engine, text: model.content, continuesAcrossChapters: true)
@@ -2002,6 +2071,7 @@ struct ReaderView: View {
 
     private func toggleSpeech() {
         isAutoReading = false
+        isAutoFlipping = false
         configureSpeech()
         if speech.isSpeaking || speech.isPaused {
             speechStartGeneration &+= 1
